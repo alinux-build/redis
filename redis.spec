@@ -1,4 +1,4 @@
-%define alicloud_base_release 1
+%define alicloud_base_release 2
 %global _hardened_build 1
 %global with_perftools 0
 
@@ -13,6 +13,15 @@
 %else
 %global with_systemd 0
 %endif
+
+# PMEM feature backported from memKeyDB, only enabled for x86 platform
+%ifarch x86_64 %{ix86}
+%global use_pmem    1
+%else
+%global use_pmem    0
+%endif
+
+%global memkind_version 1.10.1-rc2
 
 # Tests fail in mock, not in local build.
 %global with_tests   %{?_with_tests:1}%{!?_with_tests:0}
@@ -32,6 +41,11 @@ Source5:           %{name}.init
 Source6:           %{name}-shutdown
 Source7:           %{name}-limit-systemd
 Source8:           %{name}-limit-init
+# We use memkind as default allocator in PMEM feature, which is built
+# with special configurations. So we link memkind source as redis
+# build deps
+Source9:           memkind-%{memkind_version}.tar.gz
+
 # To refresh patches:
 # tar xf redis-xxx.tar.gz && cd redis-xxx && git init && git add . && git commit -m "%%{version} baseline"
 # git am %%{patches}
@@ -42,6 +56,10 @@ Source8:           %{name}-limit-init
 Patch0001:         0001-1st-man-pageis-for-redis-cli-redis-benchmark-redis-c.patch
 # https://github.com/antirez/redis/pull/3494 - symlink
 Patch0002:         0002-install-redis-check-rdb-as-a-symlink-instead-of-dupl.patch
+
+# Backport memKeyDB patches from Intel to enable PMEM feature
+Patch1001:         1001-Add-support-for-PMEM.patch
+
 %if 0%{?with_perftools}
 BuildRequires:     gperftools-devel
 %else
@@ -56,6 +74,13 @@ BuildRequires:     systemd
 %if 0%{?with_tests}
 BuildRequires:     tcl
 %endif
+%if 0%{?use_pmem}
+# Required by memkind
+BuildRequires:     autoconf automake libtool
+BuildRequires:     daxctl-devel > 65
+BuildRequires:     numactl-devel
+%endif
+
 # Required for redis-shutdown
 Requires:          /bin/awk
 Requires:          logrotate
@@ -73,6 +98,9 @@ Requires(postun):  initscripts
 Provides:          bundled(hiredis)
 Provides:          bundled(lua-libs)
 Provides:          bundled(linenoise)
+%if 0%{?use_pmem}
+Provides:          bundled(memkind)	
+%endif
 
 %description
 Redis is an advanced key-value store. It is often referred to as a data 
@@ -112,10 +140,18 @@ and removal, status checks, resharding, rebalancing, and other operations.
 %endif
 
 %prep
-%setup -q
+%setup -q -b 9
+%setup -q 
 rm -frv deps/jemalloc
+%if 0%{?use_pmem}
+mv ../memkind-%{memkind_version} deps/memkind
+%endif
 %patch0001 -p1
 %patch0002 -p1
+
+%if 0%{?use_pmem}
+%patch1001 -p1
+%endif
 
 # Use system jemalloc library
 sed -i -e '/cd jemalloc && /d' deps/Makefile
@@ -131,7 +167,13 @@ sed -i -e 's|^dir .*$|dir /var/lib/redis|g' redis.conf
 %else
 %global malloc_flags	MALLOC=jemalloc
 %endif
-%global make_flags	DEBUG="" V="echo" LDFLAGS="%{?__global_ldflags}" CFLAGS+="%{optflags} -fPIC" %{malloc_flags} INSTALL="install -p" PREFIX=%{buildroot}%{_prefix}
+# Build with PMEM feature
+%if 0%{?use_pmem}
+%global malloc_flags  MALLOC=memkind
+%global gun11_flags -std=gnu11
+%endif
+
+%global make_flags	DEBUG="" V="echo" LDFLAGS="%{?__global_ldflags}" CFLAGS+="%{?gun11_flags} %{optflags} -fPIC" %{malloc_flags} INSTALL="install -p" PREFIX=%{buildroot}%{_prefix}
 
 %build
 make %{?_smp_mflags} %{make_flags} all
@@ -271,8 +313,9 @@ fi
 
 
 %changelog
-* Mon Jun 29 2020 Jacob Wang <yungao.wjb@alibaba-inc.com> - 3.2.12-2.1
+* Mon Jun 29 2020 Jacob Wang <yungao.wjb@alibaba-inc.com> - 3.2.12-2.2
 - Rebuild for Alibaba Cloud Linux
+- Backport memKeyDB patches from Intel to redis v3.2.12
 
 * Fri Oct 26 2018 Nathan Scott <nathans@redhat.com> - 3.2.12-2
 - Update network ordering in systemd service unit files (RHBZ #1636208)

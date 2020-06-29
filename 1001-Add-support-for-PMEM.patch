@@ -1,0 +1,1943 @@
+From 991c48356e65e07e32a3aa60f3880d3ef12eed2d Mon Sep 17 00:00:00 2001
+From: michalbiesek <you@example.com>
+Date: Fri, 10 Jul 2020 11:40:17 +0200
+Subject: [PATCH 1/1] Add support for PMEM
+
+---
+ deps/Makefile    |   8 ++
+ redis.conf       |  75 ++++++++++
+ src/Makefile     |  11 +-
+ src/adlist.c     | 118 +++++++++++++---
+ src/adlist.h     |   6 +
+ src/aof.c        |   2 +-
+ src/atomicvar.h  | 133 ++++++++++++++++++
+ src/config.c     |  89 ++++++++++++
+ src/dict.c       |  11 +-
+ src/dict.h       |   1 +
+ src/latency.c    |   2 +-
+ src/networking.c |  40 +++---
+ src/object.c     |  21 ++-
+ src/pmem.c       |  99 +++++++++++++
+ src/rdb.c        |   4 +-
+ src/sds.c        |  22 ++-
+ src/sds.h        |   1 +
+ src/sdsalloc.h   |   1 +
+ src/server.c     |  23 +++-
+ src/server.h     |  27 ++++
+ src/zmalloc.c    | 352 +++++++++++++++++++++++++++++++++++++----------
+ src/zmalloc.h    |  26 +++-
+ 22 files changed, 946 insertions(+), 126 deletions(-)
+ create mode 100644 src/atomicvar.h
+ create mode 100755 src/pmem.c
+
+diff --git a/deps/Makefile b/deps/Makefile
+index 1c10bce9e..6798b5fe0 100644
+--- a/deps/Makefile
++++ b/deps/Makefile
+@@ -38,6 +38,7 @@ distclean:
+ 	-(cd lua && $(MAKE) clean) > /dev/null || true
+ 	-(cd geohash-int && $(MAKE) clean) > /dev/null || true
+ 	-(cd jemalloc && [ -f Makefile ] && $(MAKE) distclean) > /dev/null || true
++	-(cd memkind && [ -f Makefile ] && $(MAKE) distclean) > /dev/null || true
+ 	-(rm -f .make-*)
+ 
+ .PHONY: distclean
+@@ -83,6 +84,13 @@ jemalloc: .make-prerequisites
+ 
+ .PHONY: jemalloc
+ 
++memkind: .make-prerequisites
++	@printf '%b %b\n' $(MAKECOLOR)MAKE$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR)
++	cd memkind && ./autogen.sh && ARENA_LIMIT=1 MIN_LG_ALIGN=3 ./configure --disable-heap-manager
++	cd memkind && $(MAKE)
++
++.PHONY: memkind
++
+ geohash-int: .make-prerequisites
+ 	@printf '%b %b\n' $(MAKECOLOR)MAKE$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR)
+ 	cd geohash-int && $(MAKE)
+diff --git a/redis.conf b/redis.conf
+index 22e00bcfe..3178f7240 100644
+--- a/redis.conf
++++ b/redis.conf
+@@ -1050,3 +1050,78 @@ hz 10
+ # in order to commit the file to the disk more incrementally and avoid
+ # big latency spikes.
+ aof-rewrite-incremental-fsync yes
++
++############################### MEMORY ALLOCATION CONFIGURATION #############################
++#
++# Memory Allocation Policies allow modifying mechanism how heap memory is allocated via zmalloc()
++# function calls. It can target DRAM, Persistent Memory or both. In general, bigger allocations
++# should be stored in Persistent Memory which provides a higher capacity, while smaller and more
++# frequently used should be stored in DRAM.
++# When allocations are to be mixed on both types of memory, this can be defined with:
++#
++# threshold – allocations smaller than the threshold will target DRAM, equal and bigger
++# will target PMEM
++#
++# ratio – the application will be checking DRAM and PMEM utilization ratio and will adopt internal
++# threshold value to reach the defined ratio
++#
++# Redis supports four different Memory Allocation Policies:
++#
++# only-dram: use only DRAM - do not use Persistent Memory
++# only-pmem: use only Persistent Memory - do not use DRAM
++# threshold: use both Persistent Memory and DRAM - use threshold described by static-threshold
++# ratio: use both Persistent Memory and DRAM - use ratio described by dram-pmem-ratio
++#
++# By default Redis use only-dram configuration.
++memory-alloc-policy only-dram
++
++# --- THRESHOLD policy ---
++#
++# HOW IT WORKS?
++#
++# When Threshold policy is selected, application will check static-threshold parameter.
++# Allocation of the size smaller than this threshold goes to DRAM.
++# Allocation of the size equal or bigger than this threshold goes to Persistent Memory.
++# Parameter can be modified when application is running using CONFIG SET.
++#   Note: for static-threshold value equal 64 and typical SET workload with 1kb Strings values
++#         received DRAM:PMEM ratio is around 1:20
++
++# Minimum allocation size measured in bytes which goes to Persistent Memory
++static-threshold 64
++
++# --- RATIO policy ---
++#
++# HOW IT WORKS?
++#
++# Application allocates part of data in DRAM and part in Persistent Memory based on value
++# of internal dynamic threshold and dram-pmem-ratio. Application frequently compares DRAM
++# and Persistent Memory utilization and modifies value of internal dynamic threshold by
++# increasing or decreasing it to achieve expected dram-pmem-ratio. Internal dynamic threshold
++# have minimum possible limit defined by dynamic-threshold-min and maximum possible limit
++# defined by dynamic-threshold-max
++
++# The syntax of dram-pmem-ratio directive is the following:
++#
++# dram-pmem-ratio <dram_value> <pmem_value>
++#
++# Expected proportion of memory placement between DRAM and Persistent Memory.
++# Real DRAM:PMEM ratio depends on workload and its variability.
++# dram_value and pmem_value are values from range <1,INT_MAX>
++# In the example below the behavior will be to:
++# Place 25% of all memory in DRAM and 75% in Persistent Memory
++dram-pmem-ratio 1 3
++
++# Initial value of dynamic threshold
++initial-dynamic-threshold 64
++
++# Minimum value of dynamic threshold
++dynamic-threshold-min 24
++
++# Maximum value of dynamic threshold
++dynamic-threshold-max 10000
++
++# DRAM/PMEM ratio period measured in miliseconds
++memory-ratio-check-period 100
++
++# Keep hashtable structure always on DRAM
++hashtable-on-dram yes
+diff --git a/src/Makefile b/src/Makefile
+index fdbe36a30..94d4c9d2e 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -50,6 +50,9 @@ ifeq ($(USE_JEMALLOC),no)
+ 	MALLOC=libc
+ endif
+ 
++ifeq ($(USE_MEMKIND),yes)
++	MALLOC=memkind
++endif
+ # Override default settings if possible
+ -include .make-settings
+ 
+@@ -108,6 +111,12 @@ ifeq ($(MALLOC),jemalloc)
+ 	FINAL_LIBS+= ../deps/jemalloc/lib/libjemalloc.a
+ endif
+ 
++ifeq ($(MALLOC),memkind)
++    DEPENDENCY_TARGETS+= memkind
++    FINAL_CFLAGS+= -DUSE_MEMKIND -I../deps/memkind/include
++    FINAL_LIBS+= ../deps/memkind/.libs/libmemkind.a -ldaxctl -lnuma -ldl
++endif
++
+ REDIS_CC=$(QUIET_CC)$(CC) $(FINAL_CFLAGS)
+ REDIS_LD=$(QUIET_LINK)$(CC) $(FINAL_LDFLAGS)
+ REDIS_INSTALL=$(QUIET_INSTALL)$(INSTALL)
+@@ -127,7 +136,7 @@ endif
+ 
+ REDIS_SERVER_NAME=redis-server
+ REDIS_SENTINEL_NAME=redis-sentinel
+-REDIS_SERVER_OBJ=adlist.o quicklist.o ae.o anet.o dict.o server.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o pubsub.o multi.o debug.o sort.o intset.o syncio.o cluster.o crc16.o endianconv.o slowlog.o scripting.o bio.o rio.o rand.o memtest.o crc64.o bitops.o sentinel.o notify.o setproctitle.o blocked.o hyperloglog.o latency.o sparkline.o redis-check-rdb.o geo.o
++REDIS_SERVER_OBJ=adlist.o quicklist.o ae.o anet.o dict.o server.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o pubsub.o multi.o debug.o sort.o intset.o syncio.o cluster.o crc16.o endianconv.o slowlog.o scripting.o bio.o rio.o rand.o memtest.o crc64.o bitops.o sentinel.o notify.o setproctitle.o blocked.o hyperloglog.o latency.o sparkline.o redis-check-rdb.o geo.o pmem.o
+ REDIS_GEOHASH_OBJ=../deps/geohash-int/geohash.o ../deps/geohash-int/geohash_helper.o
+ REDIS_CLI_NAME=redis-cli
+ REDIS_CLI_OBJ=anet.o adlist.o redis-cli.o zmalloc.o release.o anet.o ae.o crc64.o
+diff --git a/src/adlist.c b/src/adlist.c
+index f171d3ecc..4bb9b9190 100644
+--- a/src/adlist.c
++++ b/src/adlist.c
+@@ -33,16 +33,15 @@
+ #include "adlist.h"
+ #include "zmalloc.h"
+ 
+-/* Create a new list. The created list can be freed with
+- * AlFreeList(), but private value of every node need to be freed
+- * by the user before to call AlFreeList().
+- *
+- * On error, NULL is returned. Otherwise the pointer to the new list. */
+-list *listCreate(void)
++#define LIST_GENERAL_VARIANT  0
++#define LIST_DRAM_VARIANT     1
++
++static list *_listCreate(int on_dram)
+ {
+     struct list *list;
+ 
+-    if ((list = zmalloc(sizeof(*list))) == NULL)
++    list = (on_dram == LIST_DRAM_VARIANT) ? zmalloc_dram(sizeof(*list)) : zmalloc(sizeof(*list));
++    if (list == NULL)
+         return NULL;
+     list->head = list->tail = NULL;
+     list->len = 0;
+@@ -52,10 +51,26 @@ list *listCreate(void)
+     return list;
+ }
+ 
+-/* Free the whole list.
++/* Create a new list. The created list can be freed with
++ * AlFreeList(), but private value of every node need to be freed
++ * by the user before to call AlFreeList().
+  *
+- * This function can't fail. */
+-void listRelease(list *list)
++ * On error, NULL is returned. Otherwise the pointer to the new list. */
++list *listCreate(void) {
++    return _listCreate(LIST_GENERAL_VARIANT);
++}
++
++/* Create a new list on DRAM. The created list can be freed with
++ * AlFreeList(), but private value of every node need to be freed
++ * by the user before to call AlFreeList().
++ *
++ * On error, NULL is returned. Otherwise the pointer to the new list. */
++list *listCreateDRAM(void) {
++    return _listCreate(LIST_DRAM_VARIANT);
++}
++
++/* Remove all the elements from the list without destroying the list itself. */
++static void _listEmpty(list *list, int on_dram)
+ {
+     unsigned long len;
+     listNode *current, *next;
+@@ -65,23 +80,50 @@ void listRelease(list *list)
+     while(len--) {
+         next = current->next;
+         if (list->free) list->free(current->value);
+-        zfree(current);
++        if (on_dram == LIST_DRAM_VARIANT) zfree_dram(current); else zfree(current);
+         current = next;
+     }
++}
++
++/* Remove all the elements from the list without destroying the list itself. */
++void listEmpty(list *list) {
++    _listEmpty(list, LIST_GENERAL_VARIANT);
++}
++
++/* Remove all the elements from the list on DRAM without destroying the list itself. */
++void listEmptyDRAM(list *list) {
++    _listEmpty(list, LIST_DRAM_VARIANT);
++}
++
++/* Free the whole list.
++ *
++ * This function can't fail. */
++void listRelease(list *list)
++{
++    listEmpty(list);
+     zfree(list);
+ }
+ 
++/* Free the whole list from DRAM.
++ *
++ * This function can't fail. */
++void listReleaseDRAM(list *list)
++{
++    listEmpty(list);
++    zfree_dram(list);
++}
++
+ /* Add a new node to the list, to head, containing the specified 'value'
+  * pointer as value.
+  *
+  * On error, NULL is returned and no operation is performed (i.e. the
+  * list remains unaltered).
+  * On success the 'list' pointer you pass to the function is returned. */
+-list *listAddNodeHead(list *list, void *value)
++static list *_listAddNodeHead(list *list, void *value, int on_dram)
+ {
+     listNode *node;
+-
+-    if ((node = zmalloc(sizeof(*node))) == NULL)
++    node = (on_dram == LIST_DRAM_VARIANT) ? zmalloc_dram(sizeof(*node)) : zmalloc(sizeof(*node));
++    if (node == NULL)
+         return NULL;
+     node->value = value;
+     if (list->len == 0) {
+@@ -97,6 +139,28 @@ list *listAddNodeHead(list *list, void *value)
+     return list;
+ }
+ 
++/* Add a new node to the list, to head, containing the specified 'value'
++ * pointer as value.
++ *
++ * On error, NULL is returned and no operation is performed (i.e. the
++ * list remains unaltered).
++ * On success the 'list' pointer you pass to the function is returned. */
++list *listAddNodeHead(list *list, void *value)
++{
++    return _listAddNodeHead(list, value, LIST_GENERAL_VARIANT);
++}
++
++/* Add a new node to the list on DRAM, to head, containing the specified 'value'
++ * pointer as value.
++ *
++ * On error, NULL is returned and no operation is performed (i.e. the
++ * list remains unaltered).
++ * On success the 'list' pointer you pass to the function is returned. */
++list *listAddNodeHeadDRAM(list *list, void *value)
++{
++    return _listAddNodeHead(list, value, LIST_DRAM_VARIANT);
++}
++
+ /* Add a new node to the list, to tail, containing the specified 'value'
+  * pointer as value.
+  *
+@@ -152,11 +216,7 @@ list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
+     return list;
+ }
+ 
+-/* Remove the specified node from the specified list.
+- * It's up to the caller to free the private value of the node.
+- *
+- * This function can't fail. */
+-void listDelNode(list *list, listNode *node)
++static void _listDelNode(list *list, listNode *node, int on_dram)
+ {
+     if (node->prev)
+         node->prev->next = node->next;
+@@ -167,10 +227,28 @@ void listDelNode(list *list, listNode *node)
+     else
+         list->tail = node->prev;
+     if (list->free) list->free(node->value);
+-    zfree(node);
++    if (on_dram == LIST_DRAM_VARIANT) zfree_dram(node); else zfree(node);
+     list->len--;
+ }
+ 
++/* Remove the specified node from the specified list.
++ * It's up to the caller to free the private value of the node.
++ *
++ * This function can't fail. */
++void listDelNode(list *list, listNode *node)
++{
++    _listDelNode(list, node, LIST_GENERAL_VARIANT);
++}
++
++/* Remove the specified node from DRAM the specified list.
++ * It's up to the caller to free the private value of the node.
++ *
++ * This function can't fail. */
++void listDelNodeDRAM(list *list, listNode *node)
++{
++    _listDelNode(list, node, LIST_DRAM_VARIANT);
++}
++
+ /* Returns a list iterator 'iter'. After the initialization every
+  * call to listNext() will return the next element of the list.
+  *
+diff --git a/src/adlist.h b/src/adlist.h
+index be322552f..7d78d59c0 100644
+--- a/src/adlist.h
++++ b/src/adlist.h
+@@ -71,11 +71,17 @@ typedef struct list {
+ 
+ /* Prototypes */
+ list *listCreate(void);
++list *listCreateDRAM(void);
+ void listRelease(list *list);
++void listReleaseDRAM(list *list);
++void listEmpty(list *list);
++void listEmptyDRAM(list *list);
+ list *listAddNodeHead(list *list, void *value);
++list *listAddNodeHeadDRAM(list *list, void *value);
+ list *listAddNodeTail(list *list, void *value);
+ list *listInsertNode(list *list, listNode *old_node, void *value, int after);
+ void listDelNode(list *list, listNode *node);
++void listDelNodeDRAM(list *list, listNode *node);
+ listIter *listGetIterator(list *list, int direction);
+ listNode *listNext(listIter *iter);
+ void listReleaseIterator(listIter *iter);
+diff --git a/src/aof.c b/src/aof.c
+index 3b80ca1d4..674de25e1 100644
+--- a/src/aof.c
++++ b/src/aof.c
+@@ -1292,7 +1292,7 @@ int rewriteAppendOnlyFileBackground(void) {
+         redisSetProcTitle("redis-aof-rewrite");
+         snprintf(tmpfile,256,"temp-rewriteaof-bg-%d.aof", (int) getpid());
+         if (rewriteAppendOnlyFile(tmpfile) == C_OK) {
+-            size_t private_dirty = zmalloc_get_private_dirty();
++            size_t private_dirty = zmalloc_get_private_dirty(-1);
+ 
+             if (private_dirty) {
+                 serverLog(LL_NOTICE,
+diff --git a/src/atomicvar.h b/src/atomicvar.h
+new file mode 100644
+index 000000000..160056cd7
+--- /dev/null
++++ b/src/atomicvar.h
+@@ -0,0 +1,133 @@
++/* This file implements atomic counters using __atomic or __sync macros if
++ * available, otherwise synchronizing different threads using a mutex.
++ *
++ * The exported interface is composed of three macros:
++ *
++ * atomicIncr(var,count) -- Increment the atomic counter
++ * atomicGetIncr(var,oldvalue_var,count) -- Get and increment the atomic counter
++ * atomicDecr(var,count) -- Decrement the atomic counter
++ * atomicGet(var,dstvar) -- Fetch the atomic counter value
++ * atomicSet(var,value)  -- Set the atomic counter value
++ *
++ * The variable 'var' should also have a declared mutex with the same
++ * name and the "_mutex" postfix, for instance:
++ *
++ *  long myvar;
++ *  pthread_mutex_t myvar_mutex;
++ *  atomicSet(myvar,12345);
++ *
++ * If atomic primitives are available (tested in config.h) the mutex
++ * is not used.
++ *
++ * Never use return value from the macros, instead use the AtomicGetIncr()
++ * if you need to get the current value and increment it atomically, like
++ * in the followign example:
++ *
++ *  long oldvalue;
++ *  atomicGetIncr(myvar,oldvalue,1);
++ *  doSomethingWith(oldvalue);
++ *
++ * ----------------------------------------------------------------------------
++ *
++ * Copyright (c) 2015, Salvatore Sanfilippo <antirez at gmail dot com>
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ *   * Redistributions of source code must retain the above copyright notice,
++ *     this list of conditions and the following disclaimer.
++ *   * Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in the
++ *     documentation and/or other materials provided with the distribution.
++ *   * Neither the name of Redis nor the names of its contributors may be used
++ *     to endorse or promote products derived from this software without
++ *     specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <pthread.h>
++
++#ifndef __ATOMIC_VAR_H
++#define __ATOMIC_VAR_H
++
++/* To test Redis with Helgrind (a Valgrind tool) it is useful to define
++ * the following macro, so that __sync macros are used: those can be detected
++ * by Helgrind (even if they are less efficient) so that no false positive
++ * is reported. */
++// #define __ATOMIC_VAR_FORCE_SYNC_MACROS
++
++#if !defined(__ATOMIC_VAR_FORCE_SYNC_MACROS) && defined(__ATOMIC_RELAXED) && !defined(__sun) && (!defined(__clang__) || !defined(__APPLE__) || __apple_build_version__ > 4210057)
++/* Implementation using __atomic macros. */
++
++#define atomicIncr(var,count) __atomic_add_fetch(&var,(count),__ATOMIC_RELAXED)
++#define atomicGetIncr(var,oldvalue_var,count) do { \
++    oldvalue_var = __atomic_fetch_add(&var,(count),__ATOMIC_RELAXED); \
++} while(0)
++#define atomicDecr(var,count) __atomic_sub_fetch(&var,(count),__ATOMIC_RELAXED)
++#define atomicGet(var,dstvar) do { \
++    dstvar = __atomic_load_n(&var,__ATOMIC_RELAXED); \
++} while(0)
++#define atomicSet(var,value) __atomic_store_n(&var,value,__ATOMIC_RELAXED)
++#define REDIS_ATOMIC_API "atomic-builtin"
++
++#elif defined(HAVE_ATOMIC)
++/* Implementation using __sync macros. */
++
++#define atomicIncr(var,count) __sync_add_and_fetch(&var,(count))
++#define atomicGetIncr(var,oldvalue_var,count) do { \
++    oldvalue_var = __sync_fetch_and_add(&var,(count)); \
++} while(0)
++#define atomicDecr(var,count) __sync_sub_and_fetch(&var,(count))
++#define atomicGet(var,dstvar) do { \
++    dstvar = __sync_sub_and_fetch(&var,0); \
++} while(0)
++#define atomicSet(var,value) do { \
++    while(!__sync_bool_compare_and_swap(&var,var,value)); \
++} while(0)
++#define REDIS_ATOMIC_API "sync-builtin"
++
++#else
++/* Implementation using pthread mutex. */
++
++#define atomicIncr(var,count) do { \
++    pthread_mutex_lock(&var ## _mutex); \
++    var += (count); \
++    pthread_mutex_unlock(&var ## _mutex); \
++} while(0)
++#define atomicGetIncr(var,oldvalue_var,count) do { \
++    pthread_mutex_lock(&var ## _mutex); \
++    oldvalue_var = var; \
++    var += (count); \
++    pthread_mutex_unlock(&var ## _mutex); \
++} while(0)
++#define atomicDecr(var,count) do { \
++    pthread_mutex_lock(&var ## _mutex); \
++    var -= (count); \
++    pthread_mutex_unlock(&var ## _mutex); \
++} while(0)
++#define atomicGet(var,dstvar) do { \
++    pthread_mutex_lock(&var ## _mutex); \
++    dstvar = var; \
++    pthread_mutex_unlock(&var ## _mutex); \
++} while(0)
++#define atomicSet(var,value) do { \
++    pthread_mutex_lock(&var ## _mutex); \
++    var = value; \
++    pthread_mutex_unlock(&var ## _mutex); \
++} while(0)
++#define REDIS_ATOMIC_API "pthread-mutex"
++
++#endif
++#endif /* __ATOMIC_VAR_H */
+diff --git a/src/config.c b/src/config.c
+index c1919f27a..72c1e8516 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -89,6 +89,14 @@ configEnum aof_fsync_enum[] = {
+     {NULL, 0}
+ };
+ 
++configEnum memory_alloc_policy_enum[] = {
++    {"only-dram", MEM_POLICY_ONLY_DRAM},
++    {"only-pmem", MEM_POLICY_ONLY_PMEM},
++    {"threshold", MEM_POLICY_THRESHOLD},
++    {"ratio", MEM_POLICY_RATIO},
++    {NULL, 0}
++};
++
+ /* Output buffer limits presets. */
+ clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT] = {
+     {0, 0, 0}, /* normal */
+@@ -238,6 +246,15 @@ void loadServerConfigFromString(char *config) {
+             } else if (argc == 2 && !strcasecmp(argv[1],"")) {
+                 resetServerSaveParams();
+             }
++        } else if (!strcasecmp(argv[0],"dram-pmem-ratio") && argc == 3) {
++                int dram = atoi(argv[1]);
++                int pmem = atoi(argv[2]);
++                if (dram == 0 || pmem == 0) {
++                  err = "Invalid dram-pmem-ratio parameters"; goto loaderr;
++                }
++                server.dram_pmem_ratio.dram_val = dram;
++                server.dram_pmem_ratio.pmem_val = pmem;
++                server.target_pmem_dram_ratio = (double)pmem/dram;
+         } else if (!strcasecmp(argv[0],"dir") && argc == 2) {
+             if (chdir(argv[1]) == -1) {
+                 serverLog(LL_WARNING,"Can't chdir to '%s': %s",
+@@ -293,6 +310,35 @@ void loadServerConfigFromString(char *config) {
+             if (server.maxclients < 1) {
+                 err = "Invalid max clients limit"; goto loaderr;
+             }
++        } else if (!strcasecmp(argv[0],"initial-dynamic-threshold") && argc == 2) {
++            server.initial_dynamic_threshold = atoi(argv[1]);
++            if (server.initial_dynamic_threshold < 1) {
++                err = "Invalid initial dynamic threshold"; goto loaderr;
++            }
++        } else if (!strcasecmp(argv[0],"dynamic-threshold-min") && argc == 2) {
++            server.dynamic_threshold_min = atoi(argv[1]);
++            if (server.dynamic_threshold_min < 1) {
++                err = "Invalid initial dynamic threshold min"; goto loaderr;
++            }
++        } else if (!strcasecmp(argv[0],"dynamic-threshold-max") && argc == 2) {
++            server.dynamic_threshold_max = atoi(argv[1]);
++            if (server.dynamic_threshold_max < 1) {
++                err = "Invalid initial dynamic threshold max"; goto loaderr;
++            }
++        } else if (!strcasecmp(argv[0],"static-threshold") && argc == 2) {
++            server.static_threshold = atoi(argv[1]);
++            if (server.static_threshold < 1) {
++                err = "Invalid initial static threshold"; goto loaderr;
++            }
++        } else if (!strcasecmp(argv[0],"memory-ratio-check-period") && argc == 2) {
++            server.ratio_check_period = atoi(argv[1]);
++            if (server.ratio_check_period < 1) {
++                err = "Invalid number of memory ratio check period"; goto loaderr;
++            }
++        } else if (!strcasecmp(argv[0],"hashtable-on-dram") && argc == 2) {
++            if ((server.hashtable_on_dram = yesnotoi(argv[1])) == -1) {
++                err = "argument must be 'yes' or 'no'"; goto loaderr;
++            }
+         } else if (!strcasecmp(argv[0],"maxmemory") && argc == 2) {
+             server.maxmemory = memtoll(argv[1],NULL);
+         } else if (!strcasecmp(argv[0],"maxmemory-policy") && argc == 2) {
+@@ -308,6 +354,13 @@ void loadServerConfigFromString(char *config) {
+                 err = "maxmemory-samples must be 1 or greater";
+                 goto loaderr;
+             }
++        } else if (!strcasecmp(argv[0],"memory-alloc-policy") && argc == 2) {
++            server.memory_alloc_policy =
++                configEnumGetValue(memory_alloc_policy_enum,argv[1]);
++            if (server.memory_alloc_policy == INT_MIN) {
++                err = "Invalid memory allocate policy";
++                goto loaderr;
++            }
+         } else if (!strcasecmp(argv[0],"slaveof") && argc == 3) {
+             slaveof_linenum = linenum;
+             server.masterhost = sdsnew(argv[1]);
+@@ -633,6 +686,20 @@ void loadServerConfigFromString(char *config) {
+         goto loaderr;
+     }
+ 
++    if (server.memory_alloc_policy == MEM_POLICY_RATIO) {
++        if (server.dynamic_threshold_min > server.initial_dynamic_threshold) {
++            err = "dynamic threshold: initial value must be greater than or equal to minimum value for ratio memory allocation policy";
++            goto loaderr;
++        }
++        if (server.dynamic_threshold_max < server.initial_dynamic_threshold) {
++            err = "dynamic threshold: initial value must be less than or equal to maximum value for ratio memory allocation policy";
++            goto loaderr;
++        }
++        if (server.dram_pmem_ratio.pmem_val == 0 && server.dram_pmem_ratio.dram_val == 0) {
++            err = "dram-pmem-ratio must be defined for ratio memory allocation policy";
++            goto loaderr;
++        }
++    }
+     sdsfreesplitres(lines,totlines);
+     return;
+ 
+@@ -1117,6 +1184,11 @@ void configGetCommand(client *c) {
+     config_get_numerical_field("cluster-slave-validity-factor",server.cluster_slave_validity_factor);
+     config_get_numerical_field("repl-diskless-sync-delay",server.repl_diskless_sync_delay);
+     config_get_numerical_field("tcp-keepalive",server.tcpkeepalive);
++    config_get_numerical_field("memory-ratio-check-period",server.ratio_check_period);
++    config_get_numerical_field("initial-dynamic-threshold",server.initial_dynamic_threshold);
++    config_get_numerical_field("dynamic-threshold-min",server.dynamic_threshold_min);
++    config_get_numerical_field("dynamic-threshold-max",server.dynamic_threshold_max);
++    config_get_numerical_field("static-threshold",server.static_threshold);
+ 
+     /* Bool (yes/no) values */
+     config_get_bool_field("cluster-require-full-coverage",
+@@ -1142,6 +1214,8 @@ void configGetCommand(client *c) {
+             server.aof_rewrite_incremental_fsync);
+     config_get_bool_field("aof-load-truncated",
+             server.aof_load_truncated);
++    config_get_bool_field("hashtable-on-dram",
++            server.hashtable_on_dram);
+ 
+     /* Enum values */
+     config_get_enum_field("maxmemory-policy",
+@@ -1154,6 +1228,8 @@ void configGetCommand(client *c) {
+             server.aof_fsync,aof_fsync_enum);
+     config_get_enum_field("syslog-facility",
+             server.syslog_facility,syslog_facility_enum);
++    config_get_enum_field("memory-alloc-policy",
++            server.memory_alloc_policy,memory_alloc_policy_enum);
+ 
+     /* Everything we can't handle with macros follows. */
+ 
+@@ -1206,6 +1282,13 @@ void configGetCommand(client *c) {
+         sdsfree(buf);
+         matches++;
+     }
++    if (stringmatch(pattern,"dram-pmem-ratio",1)) {
++        char buf[32];
++        snprintf(buf,sizeof(buf),"%d %d", server.dram_pmem_ratio.dram_val, server.dram_pmem_ratio.pmem_val);
++        addReplyBulkCString(c,"dram-pmem-ratio");
++        addReplyBulkCString(c,buf);
++        matches++;
++    }
+     if (stringmatch(pattern,"unixsocketperm",1)) {
+         char buf[32];
+         snprintf(buf,sizeof(buf),"%o",server.unixsocketperm);
+@@ -1820,6 +1903,12 @@ int rewriteConfig(char *path) {
+     rewriteConfigBytesOption(state,"maxmemory",server.maxmemory,CONFIG_DEFAULT_MAXMEMORY);
+     rewriteConfigEnumOption(state,"maxmemory-policy",server.maxmemory_policy,maxmemory_policy_enum,CONFIG_DEFAULT_MAXMEMORY_POLICY);
+     rewriteConfigNumericalOption(state,"maxmemory-samples",server.maxmemory_samples,CONFIG_DEFAULT_MAXMEMORY_SAMPLES);
++    rewriteConfigEnumOption(state,"memory-alloc-policy",server.memory_alloc_policy,memory_alloc_policy_enum,MEM_POLICY_ONLY_DRAM);
++    rewriteConfigNumericalOption(state,"memory-ratio-check-period",server.ratio_check_period,100);
++    rewriteConfigNumericalOption(state,"initial-dynamic-threshold",server.initial_dynamic_threshold,64);
++    rewriteConfigNumericalOption(state,"dynamic-threshold-min",server.dynamic_threshold_min,24);
++    rewriteConfigNumericalOption(state,"dynamic-threshold-max",server.dynamic_threshold_max,10000);
++    rewriteConfigNumericalOption(state,"static-threshold",server.static_threshold,64);
+     rewriteConfigYesNoOption(state,"appendonly",server.aof_state != AOF_OFF,0);
+     rewriteConfigStringOption(state,"appendfilename",server.aof_filename,CONFIG_DEFAULT_AOF_FILENAME);
+     rewriteConfigEnumOption(state,"appendfsync",server.aof_fsync,aof_fsync_enum,CONFIG_DEFAULT_AOF_FSYNC);
+diff --git a/src/dict.c b/src/dict.c
+index 3e38cb538..f6ed4c110 100644
+--- a/src/dict.c
++++ b/src/dict.c
+@@ -57,6 +57,7 @@
+  * the number of elements and the buckets > dict_force_resize_ratio. */
+ static int dict_can_resize = 1;
+ static unsigned int dict_force_resize_ratio = 5;
++static int dict_always_on_dram = 1;
+ 
+ /* -------------------------- private prototypes ---------------------------- */
+ 
+@@ -89,6 +90,10 @@ uint32_t dictGetHashFunctionSeed(void) {
+     return dict_hash_function_seed;
+ }
+ 
++void dictSetAllocPolicy(int policy) {
++    dict_always_on_dram = policy;
++}
++
+ /* MurmurHash2, by Austin Appleby
+  * Note - This code makes a few assumptions about how your machine behaves -
+  * 1. We can read a 4-byte value from any address without crashing
+@@ -217,7 +222,7 @@ int dictExpand(dict *d, unsigned long size)
+     /* Allocate the new hash table and initialize all pointers to NULL */
+     n.size = realsize;
+     n.sizemask = realsize-1;
+-    n.table = zcalloc(realsize*sizeof(dictEntry*));
++    n.table = (dict_always_on_dram) ? zcalloc_dram(realsize*sizeof(dictEntry*)) : zcalloc(realsize*sizeof(dictEntry*));
+     n.used = 0;
+ 
+     /* Is this the first initialization? If so it's not really a rehashing
+@@ -557,7 +562,7 @@ long long dictFingerprint(dict *d) {
+ 
+ dictIterator *dictGetIterator(dict *d)
+ {
+-    dictIterator *iter = zmalloc(sizeof(*iter));
++    dictIterator *iter = zmalloc_dram(sizeof(*iter));
+ 
+     iter->d = d;
+     iter->table = 0;
+@@ -618,7 +623,7 @@ void dictReleaseIterator(dictIterator *iter)
+         else
+             assert(iter->fingerprint == dictFingerprint(iter->d));
+     }
+-    zfree(iter);
++    zfree_dram(iter);
+ }
+ 
+ /* Return a random entry from the hash table. Useful to
+diff --git a/src/dict.h b/src/dict.h
+index e31daee2a..bddb7f715 100644
+--- a/src/dict.h
++++ b/src/dict.h
+@@ -174,6 +174,7 @@ void dictDisableResize(void);
+ int dictRehash(dict *d, int n);
+ int dictRehashMilliseconds(dict *d, int ms);
+ void dictSetHashFunctionSeed(unsigned int initval);
++void dictSetAllocPolicy(int policy);
+ unsigned int dictGetHashFunctionSeed(void);
+ unsigned long dictScan(dict *d, unsigned long v, dictScanFunction *fn, void *privdata);
+ 
+diff --git a/src/latency.c b/src/latency.c
+index 6f8b2a59f..53e0ec7be 100644
+--- a/src/latency.c
++++ b/src/latency.c
+@@ -79,7 +79,7 @@ int THPIsEnabled(void) {
+  * value of the function is non-zero, the process is being targeted by
+  * THP support, and is likely to have memory usage / latency issues. */
+ int THPGetAnonHugePagesSize(void) {
+-    return zmalloc_get_smap_bytes_by_field("AnonHugePages:");
++    return zmalloc_get_smap_bytes_by_field("AnonHugePages:",-1);
+ }
+ 
+ /* ---------------------------- Latency API --------------------------------- */
+diff --git a/src/networking.c b/src/networking.c
+index 2d314d597..0966c2552 100644
+--- a/src/networking.c
++++ b/src/networking.c
+@@ -62,7 +62,7 @@ int listMatchObjects(void *a, void *b) {
+ }
+ 
+ client *createClient(int fd) {
+-    client *c = zmalloc(sizeof(client));
++    client *c = zmalloc_dram(sizeof(client));
+ 
+     /* passing -1 as fd it is possible to create a non connected client.
+      * This is useful since all the commands needs to be executed
+@@ -87,7 +87,7 @@ client *createClient(int fd) {
+     c->fd = fd;
+     c->name = NULL;
+     c->bufpos = 0;
+-    c->querybuf = sdsempty();
++    c->querybuf = sdsdramempty();
+     c->querybuf_peak = 0;
+     c->reqtype = 0;
+     c->argc = 0;
+@@ -107,7 +107,7 @@ client *createClient(int fd) {
+     c->slave_listening_port = 0;
+     c->slave_ip[0] = '\0';
+     c->slave_capa = SLAVE_CAPA_NONE;
+-    c->reply = listCreate();
++    c->reply = listCreateDRAM();
+     c->reply_bytes = 0;
+     c->obuf_soft_limit_reached_time = 0;
+     listSetFreeMethod(c->reply,decrRefCountVoid);
+@@ -119,9 +119,9 @@ client *createClient(int fd) {
+     c->bpop.numreplicas = 0;
+     c->bpop.reploffset = 0;
+     c->woff = 0;
+-    c->watched_keys = listCreate();
++    c->watched_keys = listCreateDRAM();
+     c->pubsub_channels = dictCreate(&setDictType,NULL);
+-    c->pubsub_patterns = listCreate();
++    c->pubsub_patterns = listCreateDRAM();
+     c->peerid = NULL;
+     listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);
+     listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
+@@ -725,7 +725,7 @@ void acceptUnixHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
+ static void freeClientArgv(client *c) {
+     int j;
+     for (j = 0; j < c->argc; j++)
+-        decrRefCount(c->argv[j]);
++        decrRefCountDRAM(c->argv[j]);
+     c->argc = 0;
+     c->cmd = NULL;
+ }
+@@ -769,7 +769,7 @@ void unlinkClient(client *c) {
+     if (c->flags & CLIENT_PENDING_WRITE) {
+         ln = listSearchKey(server.clients_pending_write,c);
+         serverAssert(ln != NULL);
+-        listDelNode(server.clients_pending_write,ln);
++        listDelNodeDRAM(server.clients_pending_write,ln);
+         c->flags &= ~CLIENT_PENDING_WRITE;
+     }
+ 
+@@ -819,16 +819,16 @@ void freeClient(client *c) {
+ 
+     /* UNWATCH all the keys */
+     unwatchAllKeys(c);
+-    listRelease(c->watched_keys);
++    listReleaseDRAM(c->watched_keys);
+ 
+     /* Unsubscribe from all the pubsub channels */
+     pubsubUnsubscribeAllChannels(c,0);
+     pubsubUnsubscribeAllPatterns(c,0);
+     dictRelease(c->pubsub_channels);
+-    listRelease(c->pubsub_patterns);
++    listReleaseDRAM(c->pubsub_patterns);
+ 
+     /* Free data structures. */
+-    listRelease(c->reply);
++    listReleaseDRAM(c->reply);
+     freeClientArgv(c);
+ 
+     /* Unlink the client: this will close the socket, remove the I/O
+@@ -870,10 +870,10 @@ void freeClient(client *c) {
+     /* Release other dynamically allocated client structure fields,
+      * and finally release the client structure itself. */
+     if (c->name) decrRefCount(c->name);
+-    zfree(c->argv);
++    zfree_dram(c->argv);
+     freeClientMultiState(c);
+     sdsfree(c->peerid);
+-    zfree(c);
++    zfree_dram(c);
+ }
+ 
+ /* Schedule a client to free it at a safe time in the serverCron() function.
+@@ -1004,7 +1004,7 @@ int handleClientsWithPendingWrites(void) {
+     while((ln = listNext(&li))) {
+         client *c = listNodeValue(ln);
+         c->flags &= ~CLIENT_PENDING_WRITE;
+-        listDelNode(server.clients_pending_write,ln);
++        listDelNodeDRAM(server.clients_pending_write,ln);
+ 
+         /* Try to write buffers to the client socket. */
+         if (writeToClient(c->fd,c,0) == C_ERR) continue;
+@@ -1101,8 +1101,8 @@ int processInlineBuffer(client *c) {
+ 
+     /* Setup argv array on client structure */
+     if (argc) {
+-        if (c->argv) zfree(c->argv);
+-        c->argv = zmalloc(sizeof(robj*)*argc);
++        if (c->argv) zfree_dram(c->argv);
++        c->argv = zmalloc_dram(sizeof(robj*)*argc);
+     }
+ 
+     /* Create redis objects for all arguments. */
+@@ -1173,8 +1173,8 @@ int processMultibulkBuffer(client *c) {
+         c->multibulklen = ll;
+ 
+         /* Setup argv array on client structure */
+-        if (c->argv) zfree(c->argv);
+-        c->argv = zmalloc(sizeof(robj*)*c->multibulklen);
++        if (c->argv) zfree_dram(c->argv);
++        c->argv = zmalloc_dram(sizeof(robj*)*c->multibulklen);
+     }
+ 
+     serverAssertWithInfo(c,NULL,c->multibulklen > 0);
+@@ -1692,7 +1692,7 @@ void rewriteClientCommandVector(client *c, int argc, ...) {
+      * sure that if the same objects are reused in the new vector the
+      * refcount gets incremented before it gets decremented. */
+     for (j = 0; j < c->argc; j++) decrRefCount(c->argv[j]);
+-    zfree(c->argv);
++    zfree_dram(c->argv);
+     /* Replace argv and argc with our new versions. */
+     c->argv = argv;
+     c->argc = argc;
+@@ -1704,7 +1704,7 @@ void rewriteClientCommandVector(client *c, int argc, ...) {
+ /* Completely replace the client command vector with the provided one. */
+ void replaceClientCommandVector(client *c, int argc, robj **argv) {
+     freeClientArgv(c);
+-    zfree(c->argv);
++    zfree_dram(c->argv);
+     c->argv = argv;
+     c->argc = argc;
+     c->cmd = lookupCommandOrOriginal(c->argv[0]->ptr);
+@@ -1726,7 +1726,7 @@ void rewriteClientCommandArgument(client *c, int i, robj *newval) {
+     robj *oldval;
+ 
+     if (i >= c->argc) {
+-        c->argv = zrealloc(c->argv,sizeof(robj*)*(i+1));
++        c->argv = zrealloc_dram(c->argv,sizeof(robj*)*(i+1));
+         c->argc = i+1;
+         c->argv[i] = NULL;
+     }
+diff --git a/src/object.c b/src/object.c
+index db5ec3af7..367920d77 100644
+--- a/src/object.c
++++ b/src/object.c
+@@ -36,8 +36,11 @@
+ #define strtold(a,b) ((long double)strtod((a),(b)))
+ #endif
+ 
++#define OBJ_MEMORY_GENERAL  0
++#define OBJ_MEMORY_DRAM     1
++
+ robj *createObject(int type, void *ptr) {
+-    robj *o = zmalloc(sizeof(*o));
++    robj *o = zmalloc_dram(sizeof(*o));
+     o->type = type;
+     o->encoding = OBJ_ENCODING_RAW;
+     o->ptr = ptr;
+@@ -296,7 +299,7 @@ void incrRefCount(robj *o) {
+     o->refcount++;
+ }
+ 
+-void decrRefCount(robj *o) {
++static void _decrRefCount(robj *o, int on_dram) {
+     if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
+     if (o->refcount == 1) {
+         switch(o->type) {
+@@ -307,12 +310,24 @@ void decrRefCount(robj *o) {
+         case OBJ_HASH: freeHashObject(o); break;
+         default: serverPanic("Unknown object type"); break;
+         }
+-        zfree(o);
++        if (on_dram == OBJ_MEMORY_GENERAL || o->encoding == OBJ_ENCODING_EMBSTR) {
++            zfree(o);
++        } else {
++            zfree_dram(o);
++        }
+     } else {
+         o->refcount--;
+     }
+ }
+ 
++void decrRefCount(robj *o) {
++    _decrRefCount(o, OBJ_MEMORY_GENERAL);
++}
++
++void decrRefCountDRAM(robj *o) {
++    _decrRefCount(o, OBJ_MEMORY_DRAM);
++}
++
+ /* This variant of decrRefCount() gets its argument as void, and is useful
+  * as free method in data structures that expect a 'void free_object(void*)'
+  * prototype for the free method. */
+diff --git a/src/pmem.c b/src/pmem.c
+new file mode 100755
+index 000000000..0d8982863
+--- /dev/null
++++ b/src/pmem.c
+@@ -0,0 +1,99 @@
++/* pmem.c - Persistent Memory interface
++ *
++ * Copyright (c) 2020, Intel Corporation
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ *   * Redistributions of source code must start the above copyright notice,
++ *     this quicklist of conditions and the following disclaimer.
++ *   * Redistributions in binary form must reproduce the above copyright
++ *     notice, this quicklist of conditions and the following disclaimer in the
++ *     documentation and/or other materials provided with the distribution.
++ *   * Neither the name of Redis nor the names of its contributors may be used
++ *     to endorse or promote products derived from this software without
++ *     specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ */
++#include "server.h"
++
++#include <math.h>
++#include <stdio.h>
++
++#define THRESHOLD_STEP_NORMAL 0.05
++#define THRESHOLD_STEP_AGGRESIVE (THRESHOLD_STEP_NORMAL*5)
++#define THRESHOLD_UP(val, step)  ((size_t)ceil((1+(step))*val))
++#define THRESHOLD_DOWN(val, step) ((size_t)floor((1-(step))*val))
++
++static inline size_t absDiff(size_t a, size_t b) {
++    return a > b ? (a - b) : (b - a);
++}
++
++/* Initialize the pmem threshold. */
++void pmemThresholdInit(void) {
++    switch(server.memory_alloc_policy) {
++        case MEM_POLICY_ONLY_DRAM:
++            zmalloc_set_threshold(UINT_MAX);
++            break;
++        case MEM_POLICY_ONLY_PMEM:
++            zmalloc_set_threshold(0U);
++            break;
++        case MEM_POLICY_THRESHOLD:
++            zmalloc_set_threshold(server.static_threshold);
++            break;
++        case MEM_POLICY_RATIO:
++            zmalloc_set_threshold(server.initial_dynamic_threshold);
++            break;
++        default:
++            serverAssert(NULL);
++    }
++}
++
++void adjustPmemThresholdCycle(void) {
++    if (server.memory_alloc_policy == MEM_POLICY_RATIO) {
++        run_with_period(server.ratio_check_period) {
++            /* Difference between target ratio and current ratio in last checkpoint*/
++            static double ratio_diff_checkpoint;
++            /* PMEM and DRAM utilization in last checkpoint*/
++            static size_t total_memory_checkpoint;
++            size_t pmem_memory = zmalloc_used_pmem_memory();
++            size_t dram_memory = zmalloc_used_memory();
++            size_t total_memory_current = pmem_memory + dram_memory;
++            // do not modify threshold when change in memory usage is too small
++            if (absDiff(total_memory_checkpoint, total_memory_current) > 100) {
++                double current_ratio = (double)pmem_memory/dram_memory;
++                double current_ratio_diff = fabs(current_ratio - server.target_pmem_dram_ratio);
++                if (current_ratio_diff > 0.02) {
++                    //current ratio is worse than moment before
++                    double variableMultipler = current_ratio/server.target_pmem_dram_ratio;
++                    double step = (current_ratio_diff < ratio_diff_checkpoint) ?
++                                  variableMultipler*THRESHOLD_STEP_NORMAL : variableMultipler*THRESHOLD_STEP_AGGRESIVE;
++                    size_t threshold = zmalloc_get_threshold();
++                    if (server.target_pmem_dram_ratio < current_ratio) {
++                        size_t higher_threshold = THRESHOLD_UP(threshold,step);
++                        if (higher_threshold <= server.dynamic_threshold_max)
++                            zmalloc_set_threshold(higher_threshold);
++                    } else {
++                        size_t lower_threshold = THRESHOLD_DOWN(threshold,step);
++                        if (lower_threshold >= server.dynamic_threshold_min)
++                            zmalloc_set_threshold(lower_threshold);
++                    }
++                }
++                ratio_diff_checkpoint = current_ratio_diff;
++            }
++            total_memory_checkpoint = total_memory_current;
++        }
++    }
++}
+diff --git a/src/rdb.c b/src/rdb.c
+index a6b33d486..3bd3d030c 100644
+--- a/src/rdb.c
++++ b/src/rdb.c
+@@ -934,7 +934,7 @@ int rdbSaveBackground(char *filename) {
+         redisSetProcTitle("redis-rdb-bgsave");
+         retval = rdbSave(filename);
+         if (retval == C_OK) {
+-            size_t private_dirty = zmalloc_get_private_dirty();
++            size_t private_dirty = zmalloc_get_private_dirty(-1);
+ 
+             if (private_dirty) {
+                 serverLog(LL_NOTICE,
+@@ -1639,7 +1639,7 @@ int rdbSaveToSlavesSockets(void) {
+             retval = C_ERR;
+ 
+         if (retval == C_OK) {
+-            size_t private_dirty = zmalloc_get_private_dirty();
++            size_t private_dirty = zmalloc_get_private_dirty(-1);
+ 
+             if (private_dirty) {
+                 serverLog(LL_NOTICE,
+diff --git a/src/sds.c b/src/sds.c
+index 26e90a6db..f0ceded55 100644
+--- a/src/sds.c
++++ b/src/sds.c
+@@ -38,6 +38,9 @@
+ #include "sds.h"
+ #include "sdsalloc.h"
+ 
++#define SDS_GENERAL_VARIANT  0
++#define SDS_DRAM_VARIANT     1
++
+ static inline int sdsHdrSize(char type) {
+     switch(type&SDS_TYPE_MASK) {
+         case SDS_TYPE_5:
+@@ -78,7 +81,7 @@ static inline char sdsReqType(size_t string_size) {
+  * You can print the string with printf() as there is an implicit \0 at the
+  * end of the string. However the string is binary safe and can contain
+  * \0 characters in the middle, as the length is stored in the sds header. */
+-sds sdsnewlen(const void *init, size_t initlen) {
++static sds _sdsnewlen(const void *init, size_t initlen, int on_dram) {
+     void *sh;
+     sds s;
+     char type = sdsReqType(initlen);
+@@ -88,7 +91,8 @@ sds sdsnewlen(const void *init, size_t initlen) {
+     int hdrlen = sdsHdrSize(type);
+     unsigned char *fp; /* flags pointer. */
+ 
+-    sh = s_malloc(hdrlen+initlen+1);
++    sh = (on_dram == SDS_DRAM_VARIANT) ? s_dram_malloc(hdrlen+initlen+1)
++                                       : s_malloc(hdrlen+initlen+1);
+     if (!init)
+         memset(sh, 0, hdrlen+initlen+1);
+     if (sh == NULL) return NULL;
+@@ -134,12 +138,26 @@ sds sdsnewlen(const void *init, size_t initlen) {
+     return s;
+ }
+ 
++sds sdsnewlen(const void *init, size_t initlen) {
++    return _sdsnewlen(init, initlen, SDS_GENERAL_VARIANT);
++}
++
++static sds sdsdramnewlen(const void *init, size_t initlen) {
++    return _sdsnewlen(init, initlen, SDS_DRAM_VARIANT);
++}
++
+ /* Create an empty (zero length) sds string. Even in this case the string
+  * always has an implicit null term. */
+ sds sdsempty(void) {
+     return sdsnewlen("",0);
+ }
+ 
++/* Create an empty (zero length) sds string on DRAM. Even in this case the string
++ * always has an implicit null term. */
++sds sdsdramempty(void) {
++    return sdsdramnewlen("",0);
++}
++
+ /* Create a new sds string starting from a null terminated C string. */
+ sds sdsnew(const char *init) {
+     size_t initlen = (init == NULL) ? 0 : strlen(init);
+diff --git a/src/sds.h b/src/sds.h
+index 394f8b52e..60bd41dca 100644
+--- a/src/sds.h
++++ b/src/sds.h
+@@ -217,6 +217,7 @@ static inline void sdssetalloc(sds s, size_t newlen) {
+ sds sdsnewlen(const void *init, size_t initlen);
+ sds sdsnew(const char *init);
+ sds sdsempty(void);
++sds sdsdramempty(void);
+ sds sdsdup(const sds s);
+ void sdsfree(sds s);
+ sds sdsgrowzero(sds s, size_t len);
+diff --git a/src/sdsalloc.h b/src/sdsalloc.h
+index 531d41929..6fe22ed5b 100644
+--- a/src/sdsalloc.h
++++ b/src/sdsalloc.h
+@@ -40,3 +40,4 @@
+ #define s_malloc zmalloc
+ #define s_realloc zrealloc
+ #define s_free zfree
++#define s_dram_malloc zmalloc_dram
+diff --git a/src/server.c b/src/server.c
+index 072ceb38f..906425742 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -1032,6 +1032,9 @@ void databasesCron(void) {
+     if (server.active_expire_enabled && server.masterhost == NULL)
+         activeExpireCycle(ACTIVE_EXPIRE_CYCLE_SLOW);
+ 
++    /* Adjust PMEM threshold. */
++    adjustPmemThresholdCycle();
++
+     /* Perform hash tables rehashing if needed, but only if there are no
+      * other processes saving the DB on disk. Otherwise rehashing is bad
+      * as will cause a lot of copy-on-write of memory pages. */
+@@ -1517,6 +1520,13 @@ void initServerConfig(void) {
+     server.activerehashing = CONFIG_DEFAULT_ACTIVE_REHASHING;
+     server.notify_keyspace_events = 0;
+     server.maxclients = CONFIG_DEFAULT_MAX_CLIENTS;
++    server.hashtable_on_dram = 1;
++    server.memory_alloc_policy = MEM_POLICY_ONLY_DRAM;
++    server.ratio_check_period = 100;
++    server.initial_dynamic_threshold = 64;
++    server.dynamic_threshold_min = 24;
++    server.dynamic_threshold_max = 10000;
++    server.static_threshold = 64;
+     server.bpop_blocked_clients = 0;
+     server.maxmemory = CONFIG_DEFAULT_MAXMEMORY;
+     server.maxmemory_policy = CONFIG_DEFAULT_MAXMEMORY_POLICY;
+@@ -2011,6 +2021,8 @@ void initServer(void) {
+     scriptingInit(1);
+     slowlogInit();
+     latencyMonitorInit();
++    pmemThresholdInit();
++    dictSetAllocPolicy(server.hashtable_on_dram);
+     bioInit();
+ }
+ 
+@@ -2951,13 +2963,16 @@ sds genRedisInfoString(char *section) {
+     /* Memory */
+     if (allsections || defsections || !strcasecmp(section,"memory")) {
+         char hmem[64];
++        char hmem_pmem[64];
+         char peak_hmem[64];
+         char total_system_hmem[64];
+         char used_memory_lua_hmem[64];
+         char used_memory_rss_hmem[64];
+         char maxmemory_hmem[64];
+         size_t zmalloc_used = zmalloc_used_memory();
++        size_t zmalloc_pmem_used = zmalloc_used_pmem_memory();
+         size_t total_system_mem = server.system_memory_size;
++        size_t pmem_threshold = zmalloc_get_threshold();
+         const char *evict_policy = evictPolicyToString();
+         long long memory_lua = (long long)lua_gc(server.lua,LUA_GCCOUNT,0)*1024;
+ 
+@@ -2969,6 +2984,7 @@ sds genRedisInfoString(char *section) {
+             server.stat_peak_memory = zmalloc_used;
+ 
+         bytesToHuman(hmem,zmalloc_used);
++        bytesToHuman(hmem_pmem,zmalloc_pmem_used);
+         bytesToHuman(peak_hmem,server.stat_peak_memory);
+         bytesToHuman(total_system_hmem,total_system_mem);
+         bytesToHuman(used_memory_lua_hmem,memory_lua);
+@@ -2984,6 +3000,9 @@ sds genRedisInfoString(char *section) {
+             "used_memory_rss_human:%s\r\n"
+             "used_memory_peak:%zu\r\n"
+             "used_memory_peak_human:%s\r\n"
++            "pmem_threshold:%zu\r\n"
++            "used_memory_pmem:%zu\r\n"
++            "used_memory_pmem_human:%s\r\n"
+             "total_system_memory:%lu\r\n"
+             "total_system_memory_human:%s\r\n"
+             "used_memory_lua:%lld\r\n"
+@@ -2999,6 +3018,9 @@ sds genRedisInfoString(char *section) {
+             used_memory_rss_hmem,
+             server.stat_peak_memory,
+             peak_hmem,
++            pmem_threshold,
++            zmalloc_pmem_used,
++            hmem_pmem,
+             (unsigned long)total_system_mem,
+             total_system_hmem,
+             memory_lua,
+@@ -3994,7 +4016,6 @@ int main(int argc, char **argv) {
+     spt_init(argc, argv);
+ #endif
+     setlocale(LC_COLLATE,"");
+-    zmalloc_enable_thread_safeness();
+     zmalloc_set_oom_handler(redisOutOfMemoryHandler);
+     srand(time(NULL)^getpid());
+     gettimeofday(&tv,NULL);
+diff --git a/src/server.h b/src/server.h
+index ddf8be137..4d0b9e69a 100644
+--- a/src/server.h
++++ b/src/server.h
+@@ -457,6 +457,13 @@ typedef long long mstime_t; /* millisecond time type. */
+ /* A redis object, that is a type able to hold a string / list / set */
+ 
+ /* The actual Redis Object */
++
++/* Memory allocation policy states */
++#define MEM_POLICY_ONLY_DRAM 0          /* only use DRAM */
++#define MEM_POLICY_ONLY_PMEM 1          /* only use PMEM */
++#define MEM_POLICY_RATIO     2          /* use DRAM and PMEM - ratio variant*/
++#define MEM_POLICY_THRESHOLD 3          /* use DRAM and PMEM - threshold variant*/
++
+ #define LRU_BITS 24
+ #define LRU_CLOCK_MAX ((1<<LRU_BITS)-1) /* Max value of obj->lru */
+ #define LRU_CLOCK_RESOLUTION 1000 /* LRU clock resolution in ms */
+@@ -663,6 +670,11 @@ typedef struct clientBufferLimitsConfig {
+     time_t soft_limit_seconds;
+ } clientBufferLimitsConfig;
+ 
++typedef struct ratioDramPmemConfig {
++    int pmem_val;
++    int dram_val;
++} ratioDramPmemConfig;
++
+ extern clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT];
+ 
+ /* The redisOp structure defines a Redis Operation, that is an instance of
+@@ -912,6 +924,16 @@ struct redisServer {
+     unsigned long long maxmemory;   /* Max number of memory bytes to use */
+     int maxmemory_policy;           /* Policy for key eviction */
+     int maxmemory_samples;          /* Pricision of random sampling */
++    /* PMEM */
++    int memory_alloc_policy;                  /* Policy for memory allocation */
++    unsigned int static_threshold;            /* Persistent Memory static threshold */
++    unsigned int initial_dynamic_threshold;   /* Persistent Memory initial dynamic threshold */
++    unsigned int dynamic_threshold_min;       /* Minimum value of dynamic threshold */
++    unsigned int dynamic_threshold_max;       /* Maximum value of dynamic threshold */
++    ratioDramPmemConfig dram_pmem_ratio;      /* DRAM/Persistent Memory ratio */
++    double target_pmem_dram_ratio;            /* Target PMEM/DRAM ratio */
++    int ratio_check_period;                   /* Period of checking ratio in Cron*/
++    int hashtable_on_dram;                    /* Keep hashtable always on DRAM */
+     /* Blocked clients */
+     unsigned int bpop_blocked_clients; /* Number of clients blocked by lists */
+     list *unblocked_clients; /* list of clients to unblock before next loop */
+@@ -1184,6 +1206,7 @@ void execCommandPropagateMulti(client *c);
+ 
+ /* Redis object implementation */
+ void decrRefCount(robj *o);
++void decrRefCountDRAM(robj *o);
+ void decrRefCountVoid(void *o);
+ void incrRefCount(robj *o);
+ robj *resetRefCount(robj *obj);
+@@ -1472,6 +1495,10 @@ void replyToBlockedClientTimedOut(client *c);
+ int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int unit);
+ void disconnectAllBlockedClients(void);
+ 
++/* pmem.c - Handling Persistent Memory */
++void pmemThresholdInit(void);
++void adjustPmemThresholdCycle(void);
++
+ /* Git SHA1 */
+ char *redisGitSHA1(void);
+ char *redisGitDirty(void);
+diff --git a/src/zmalloc.c b/src/zmalloc.c
+index edfbd5705..7884fab7e 100644
+--- a/src/zmalloc.c
++++ b/src/zmalloc.c
+@@ -28,8 +28,10 @@
+  * POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include <limits.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <stdint.h>
+ 
+ /* This function provide us access to the original libc free(). This is useful
+  * for instance to free results obtained by backtrace_symbols(). We need
+@@ -43,6 +45,7 @@ void zlibc_free(void *ptr) {
+ #include <pthread.h>
+ #include "config.h"
+ #include "zmalloc.h"
++#include "atomicvar.h"
+ 
+ #ifdef HAVE_MALLOC_SIZE
+ #define PREFIX_SIZE (0)
+@@ -54,6 +57,9 @@ void zlibc_free(void *ptr) {
+ #endif
+ #endif
+ 
++#define DRAM_LOCATION 0
++#define PMEM_LOCATION 1
++
+ /* Explicitly override malloc/free etc when using tcmalloc. */
+ #if defined(USE_TCMALLOC)
+ #define malloc(size) tc_malloc(size)
+@@ -65,52 +71,84 @@ void zlibc_free(void *ptr) {
+ #define calloc(count,size) je_calloc(count,size)
+ #define realloc(ptr,size) je_realloc(ptr,size)
+ #define free(ptr) je_free(ptr)
++#elif defined(USE_MEMKIND)
++#include <errno.h>
++#define malloc(size) memkind_malloc(MEMKIND_DEFAULT,size)
++#define calloc(count,size) memkind_calloc(MEMKIND_DEFAULT,count,size)
++#define realloc_dram(ptr,size) memkind_realloc(MEMKIND_DEFAULT,ptr,size)
++#define realloc_pmem(ptr,size) memkind_realloc(MEMKIND_DAX_KMEM,ptr,size)
++#define free_dram(ptr) memkind_free(MEMKIND_DEFAULT,ptr)
++#define free_pmem(ptr) memkind_free(MEMKIND_DAX_KMEM,ptr)
+ #endif
+ 
+-#if defined(__ATOMIC_RELAXED)
+-#define update_zmalloc_stat_add(__n) __atomic_add_fetch(&used_memory, (__n), __ATOMIC_RELAXED)
+-#define update_zmalloc_stat_sub(__n) __atomic_sub_fetch(&used_memory, (__n), __ATOMIC_RELAXED)
+-#elif defined(HAVE_ATOMIC)
+-#define update_zmalloc_stat_add(__n) __sync_add_and_fetch(&used_memory, (__n))
+-#define update_zmalloc_stat_sub(__n) __sync_sub_and_fetch(&used_memory, (__n))
+-#else
+-#define update_zmalloc_stat_add(__n) do { \
+-    pthread_mutex_lock(&used_memory_mutex); \
+-    used_memory += (__n); \
+-    pthread_mutex_unlock(&used_memory_mutex); \
+-} while(0)
++#ifndef USE_MEMKIND
++static void zmalloc_pmem_not_available(void) {
++    fprintf(stderr, "zmalloc: PMEM function is available only for memkind allocator\n");
++    fflush(stderr);
++    abort();
++}
++#define free_dram(ptr) free(ptr)
++#define realloc_dram(ptr,size) realloc(ptr,size)
+ 
+-#define update_zmalloc_stat_sub(__n) do { \
+-    pthread_mutex_lock(&used_memory_mutex); \
+-    used_memory -= (__n); \
+-    pthread_mutex_unlock(&used_memory_mutex); \
+-} while(0)
++static int zmalloc_is_pmem(void * ptr) {
++    (void)(ptr);
++    return DRAM_LOCATION;
++}
++
++static void zfree_pmem(void *ptr) {
++    (void)(ptr);
++    zmalloc_pmem_not_available();
++}
++
++static void *zmalloc_pmem(size_t size) {
++    (void)(size);
++    zmalloc_pmem_not_available();
++    return NULL;
++}
++
++static void *zcalloc_pmem(size_t size) {
++    (void)(size);
++    zmalloc_pmem_not_available();
++    return NULL;
++}
+ 
++static void *zrealloc_pmem(void *ptr, size_t size) {
++    (void)(ptr);
++    (void)(size);
++    zmalloc_pmem_not_available();
++    return NULL;
++}
+ #endif
+ 
+ #define update_zmalloc_stat_alloc(__n) do { \
+     size_t _n = (__n); \
+     if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \
+-    if (zmalloc_thread_safe) { \
+-        update_zmalloc_stat_add(_n); \
+-    } else { \
+-        used_memory += _n; \
+-    } \
++    atomicIncr(used_memory,__n); \
++} while(0)
++
++#define update_zmalloc_pmem_stat_alloc(__n) do { \
++    size_t _n = (__n); \
++    if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \
++    atomicIncr(used_pmem_memory,__n); \
+ } while(0)
+ 
+ #define update_zmalloc_stat_free(__n) do { \
+     size_t _n = (__n); \
+     if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \
+-    if (zmalloc_thread_safe) { \
+-        update_zmalloc_stat_sub(_n); \
+-    } else { \
+-        used_memory -= _n; \
+-    } \
++    atomicDecr(used_memory,__n); \
++} while(0)
++
++#define update_zmalloc_pmem_stat_free(__n) do { \
++    size_t _n = (__n); \
++    if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \
++    atomicDecr(used_pmem_memory,__n); \
+ } while(0)
+ 
++static size_t pmem_threshold = UINT_MAX;
+ static size_t used_memory = 0;
+-static int zmalloc_thread_safe = 0;
++static size_t used_pmem_memory = 0;
+ pthread_mutex_t used_memory_mutex = PTHREAD_MUTEX_INITIALIZER;
++pthread_mutex_t used_pmem_memory_mutex = PTHREAD_MUTEX_INITIALIZER;
+ 
+ static void zmalloc_default_oom(size_t size) {
+     fprintf(stderr, "zmalloc: Out of memory trying to allocate %zu bytes\n",
+@@ -121,10 +159,13 @@ static void zmalloc_default_oom(size_t size) {
+ 
+ static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
+ 
+-void *zmalloc(size_t size) {
++void *zmalloc_dram(size_t size) {
+     void *ptr = malloc(size+PREFIX_SIZE);
+-
++#ifdef USE_MEMKIND
++    if (!ptr && errno==ENOMEM) zmalloc_oom_handler(size);
++#else
+     if (!ptr) zmalloc_oom_handler(size);
++#endif
+ #ifdef HAVE_MALLOC_SIZE
+     update_zmalloc_stat_alloc(zmalloc_size(ptr));
+     return ptr;
+@@ -135,7 +176,96 @@ void *zmalloc(size_t size) {
+ #endif
+ }
+ 
+-void *zcalloc(size_t size) {
++#ifdef USE_MEMKIND
++static int zmalloc_is_pmem(void * ptr) {
++    struct memkind *temp_kind = memkind_detect_kind(ptr);
++    return (temp_kind == MEMKIND_DEFAULT) ? DRAM_LOCATION : PMEM_LOCATION;
++}
++
++static void zfree_pmem(void *ptr) {
++#ifndef HAVE_MALLOC_SIZE
++    void *realptr;
++    size_t oldsize;
++#endif
++
++    if (ptr == NULL) return;
++#ifdef HAVE_MALLOC_SIZE
++    update_zmalloc_pmem_stat_free(zmalloc_size(ptr));
++    free_pmem(ptr);
++#else
++    realptr = (char*)ptr-PREFIX_SIZE;
++    oldsize = *((size_t*)realptr);
++    update_zmalloc_pmem_stat_free(oldsize+PREFIX_SIZE);
++    free_pmem(realptr);
++#endif
++}
++
++static void *zmalloc_pmem(size_t size) {
++    void *ptr = memkind_malloc(MEMKIND_DAX_KMEM, size+PREFIX_SIZE);
++    if (!ptr && errno==ENOMEM) zmalloc_oom_handler(size);
++#ifdef HAVE_MALLOC_SIZE
++    update_zmalloc_pmem_stat_alloc(zmalloc_size(ptr));
++    return ptr;
++#else
++    *((size_t*)ptr) = size;
++    update_zmalloc_pmem_stat_alloc(size+PREFIX_SIZE);
++    return (char*)ptr+PREFIX_SIZE;
++#endif
++}
++
++static void *zcalloc_pmem(size_t size) {
++    void *ptr = memkind_calloc(MEMKIND_DAX_KMEM, 1, size+PREFIX_SIZE);
++
++    if (!ptr && errno==ENOMEM) zmalloc_oom_handler(size);
++#ifdef HAVE_MALLOC_SIZE
++    update_zmalloc_pmem_stat_alloc(zmalloc_size(ptr));
++    return ptr;
++#else
++    *((size_t*)ptr) = size;
++    update_zmalloc_pmem_stat_alloc(size+PREFIX_SIZE);
++    return (char*)ptr+PREFIX_SIZE;
++#endif
++}
++
++static void *zrealloc_pmem(void *ptr, size_t size) {
++#ifndef HAVE_MALLOC_SIZE
++    void *realptr;
++#endif
++    size_t oldsize;
++    void *newptr;
++
++    if (size == 0 && ptr != NULL) {
++        zfree_pmem(ptr);
++        return NULL;
++    }
++    if (ptr == NULL) return zmalloc(size);
++#ifdef HAVE_MALLOC_SIZE
++    oldsize = zmalloc_size(ptr);
++    newptr = realloc_pmem(ptr,size);
++    if (!newptr) zmalloc_oom_handler(size);
++
++    update_zmalloc_pmem_stat_free(oldsize);
++    update_zmalloc_pmem_stat_alloc(zmalloc_size(newptr));
++    return newptr;
++#else
++    realptr = (char*)ptr-PREFIX_SIZE;
++    oldsize = *((size_t*)realptr);
++    newptr = realloc_pmem(realptr,size+PREFIX_SIZE);
++    if (!newptr) zmalloc_oom_handler(size);
++
++    *((size_t*)newptr) = size;
++    update_zmalloc_pmem_stat_free(oldsize+PREFIX_SIZE);
++    update_zmalloc_pmem_stat_alloc(size+PREFIX_SIZE);
++    return (char*)newptr+PREFIX_SIZE;
++#endif
++}
++#endif
++
++void *zmalloc(size_t size) {
++    return (size < pmem_threshold) ? zmalloc_dram(size) : zmalloc_pmem(size);
++}
++
++void *zcalloc_dram(size_t size) {
+     void *ptr = calloc(1, size+PREFIX_SIZE);
+ 
+     if (!ptr) zmalloc_oom_handler(size);
+@@ -149,17 +279,25 @@ void *zcalloc(size_t size) {
+ #endif
+ }
+ 
+-void *zrealloc(void *ptr, size_t size) {
++void *zcalloc(size_t size) {
++    return (size < pmem_threshold) ? zcalloc_dram(size) : zcalloc_pmem(size);
++}
++
++void *zrealloc_dram(void *ptr, size_t size) {
+ #ifndef HAVE_MALLOC_SIZE
+     void *realptr;
+ #endif
+     size_t oldsize;
+     void *newptr;
+ 
++    if (size == 0 && ptr != NULL) {
++        zfree_dram(ptr);
++        return NULL;
++    }
+     if (ptr == NULL) return zmalloc(size);
+ #ifdef HAVE_MALLOC_SIZE
+     oldsize = zmalloc_size(ptr);
+-    newptr = realloc(ptr,size);
++    newptr = realloc_dram(ptr,size);
+     if (!newptr) zmalloc_oom_handler(size);
+ 
+     update_zmalloc_stat_free(oldsize);
+@@ -168,16 +306,24 @@ void *zrealloc(void *ptr, size_t size) {
+ #else
+     realptr = (char*)ptr-PREFIX_SIZE;
+     oldsize = *((size_t*)realptr);
+-    newptr = realloc(realptr,size+PREFIX_SIZE);
++    newptr = realloc_dram(realptr,size+PREFIX_SIZE);
+     if (!newptr) zmalloc_oom_handler(size);
+ 
+     *((size_t*)newptr) = size;
+-    update_zmalloc_stat_free(oldsize);
+-    update_zmalloc_stat_alloc(size);
++    update_zmalloc_stat_free(oldsize+PREFIX_SIZE);
++    update_zmalloc_stat_alloc(size+PREFIX_SIZE);
+     return (char*)newptr+PREFIX_SIZE;
+ #endif
+ }
+ 
++void *zrealloc(void *ptr, size_t size) {
++    if (!zmalloc_is_pmem(ptr)) {
++        return zrealloc_dram(ptr, size);
++    } else {
++        return zrealloc_pmem(ptr, size);
++    }
++}
++
+ /* Provide zmalloc_size() for systems where this function is not provided by
+  * malloc itself, given that in that case we store a header with this
+  * information as the first bytes of every allocation. */
+@@ -190,9 +336,12 @@ size_t zmalloc_size(void *ptr) {
+     if (size&(sizeof(long)-1)) size += sizeof(long)-(size&(sizeof(long)-1));
+     return size+PREFIX_SIZE;
+ }
++size_t zmalloc_usable(void *ptr) {
++    return zmalloc_size(ptr)-PREFIX_SIZE;
++}
+ #endif
+ 
+-void zfree(void *ptr) {
++void zfree_dram(void *ptr) {
+ #ifndef HAVE_MALLOC_SIZE
+     void *realptr;
+     size_t oldsize;
+@@ -201,15 +350,23 @@ void zfree(void *ptr) {
+     if (ptr == NULL) return;
+ #ifdef HAVE_MALLOC_SIZE
+     update_zmalloc_stat_free(zmalloc_size(ptr));
+-    free(ptr);
++    free_dram(ptr);
+ #else
+     realptr = (char*)ptr-PREFIX_SIZE;
+     oldsize = *((size_t*)realptr);
+     update_zmalloc_stat_free(oldsize+PREFIX_SIZE);
+-    free(realptr);
++    free_dram(realptr);
+ #endif
+ }
+ 
++void zfree(void *ptr) {
++    if (!zmalloc_is_pmem(ptr)) {
++        zfree_dram(ptr);
++    } else {
++        zfree_pmem(ptr);
++    }
++}
++
+ char *zstrdup(const char *s) {
+     size_t l = strlen(s)+1;
+     char *p = zmalloc(l);
+@@ -220,31 +377,28 @@ char *zstrdup(const char *s) {
+ 
+ size_t zmalloc_used_memory(void) {
+     size_t um;
+-
+-    if (zmalloc_thread_safe) {
+-#if defined(__ATOMIC_RELAXED) || defined(HAVE_ATOMIC)
+-        um = update_zmalloc_stat_add(0);
+-#else
+-        pthread_mutex_lock(&used_memory_mutex);
+-        um = used_memory;
+-        pthread_mutex_unlock(&used_memory_mutex);
+-#endif
+-    }
+-    else {
+-        um = used_memory;
+-    }
+-
++    atomicGet(used_memory,um);
+     return um;
+ }
+ 
+-void zmalloc_enable_thread_safeness(void) {
+-    zmalloc_thread_safe = 1;
++size_t zmalloc_used_pmem_memory(void) {
++    size_t um;
++    atomicGet(used_pmem_memory,um);
++    return um;
+ }
+ 
+ void zmalloc_set_oom_handler(void (*oom_handler)(size_t)) {
+     zmalloc_oom_handler = oom_handler;
+ }
+ 
++size_t zmalloc_get_threshold(void) {
++    return pmem_threshold;
++}
++
++void zmalloc_set_threshold(size_t threshold) {
++    pmem_threshold = threshold;
++}
++
+ /* Get the RSS information in an OS-specific way.
+  *
+  * WARNING: the function zmalloc_get_rss() is not designed to be fast
+@@ -312,6 +466,26 @@ size_t zmalloc_get_rss(void) {
+ 
+     return t_info.resident_size;
+ }
++#elif defined(__FreeBSD__)
++#include <sys/types.h>
++#include <sys/sysctl.h>
++#include <sys/user.h>
++#include <unistd.h>
++
++size_t zmalloc_get_rss(void) {
++    struct kinfo_proc info;
++    size_t infolen = sizeof(info);
++    int mib[4];
++    mib[0] = CTL_KERN;
++    mib[1] = KERN_PROC;
++    mib[2] = KERN_PROC_PID;
++    mib[3] = getpid();
++
++    if (sysctl(mib, 4, &info, &infolen, NULL, 0) == 0)
++        return (size_t)info.ki_rssize;
++
++    return 0L;
++}
+ #else
+ size_t zmalloc_get_rss(void) {
+     /* If we can't get the RSS in an OS-specific way for this system just
+@@ -323,23 +497,38 @@ size_t zmalloc_get_rss(void) {
+ }
+ #endif
+ 
+-/* Fragmentation = RSS / allocated-bytes */
+-float zmalloc_get_fragmentation_ratio(size_t rss) {
+-    return (float)rss/zmalloc_used_memory();
+-}
++#if defined(__APPLE__)
++/* For proc_pidinfo() used later in zmalloc_get_smap_bytes_by_field().
++ * Note that this file cannot be included in zmalloc.h because it includes
++ * a Darwin queue.h file where there is a "LIST_HEAD" macro (!) defined
++ * conficting with Redis user code. */
++#include <libproc.h>
++#endif
+ 
+ /* Get the sum of the specified field (converted form kb to bytes) in
+  * /proc/self/smaps. The field must be specified with trailing ":" as it
+  * apperas in the smaps output.
+  *
+- * Example: zmalloc_get_smap_bytes_by_field("Rss:");
++ * If a pid is specified, the information is extracted for such a pid,
++ * otherwise if pid is -1 the information is reported is about the
++ * current process.
++ *
++ * Example: zmalloc_get_smap_bytes_by_field("Rss:",-1);
+  */
+ #if defined(HAVE_PROC_SMAPS)
+-size_t zmalloc_get_smap_bytes_by_field(char *field) {
++size_t zmalloc_get_smap_bytes_by_field(char *field, long pid) {
+     char line[1024];
+     size_t bytes = 0;
+-    FILE *fp = fopen("/proc/self/smaps","r");
+     int flen = strlen(field);
++    FILE *fp;
++
++    if (pid == -1) {
++        fp = fopen("/proc/self/smaps","r");
++    } else {
++        char filename[128];
++        snprintf(filename,sizeof(filename),"/proc/%ld/smaps",pid);
++        fp = fopen(filename,"r");
++    }
+ 
+     if (!fp) return 0;
+     while(fgets(line,sizeof(line),fp) != NULL) {
+@@ -355,18 +544,45 @@ size_t zmalloc_get_smap_bytes_by_field(char *field) {
+     return bytes;
+ }
+ #else
+-size_t zmalloc_get_smap_bytes_by_field(char *field) {
++/* Get sum of the specified field from libproc api call.
++ * As there are per page value basis we need to convert
++ * them accordingly.
++ *
++ * Note that AnonHugePages is a no-op as THP feature
++ * is not supported in this platform
++ */
++size_t zmalloc_get_smap_bytes_by_field(char *field, long pid) {
++#if defined(__APPLE__)
++    struct proc_regioninfo pri;
++    if (proc_pidinfo(pid, PROC_PIDREGIONINFO, 0, &pri, PROC_PIDREGIONINFO_SIZE) ==
++	PROC_PIDREGIONINFO_SIZE) {
++	if (!strcmp(field, "Private_Dirty:")) {
++            return (size_t)pri.pri_pages_dirtied * 4096;
++	} else if (!strcmp(field, "Rss:")) {
++            return (size_t)pri.pri_pages_resident * 4096;
++	} else if (!strcmp(field, "AnonHugePages:")) {
++            return 0;
++	}
++    }
++    return 0;
++#endif
+     ((void) field);
++    ((void) pid);
+     return 0;
+ }
+ #endif
+ 
+-size_t zmalloc_get_private_dirty(void) {
+-    return zmalloc_get_smap_bytes_by_field("Private_Dirty:");
++size_t zmalloc_get_private_dirty(long pid) {
++    return zmalloc_get_smap_bytes_by_field("Private_Dirty:",pid);
++}
++
++float zmalloc_get_fragmentation_ratio(size_t rss) {
++    return (float)rss/(zmalloc_used_memory()+zmalloc_used_pmem_memory());
++
+ }
+ 
+ /* Returns the size of physical memory (RAM) in bytes.
+- * It looks ugly, but this is the cleanest way to achive cross platform results.
++ * It looks ugly, but this is the cleanest way to achieve cross platform results.
+  * Cleaned up from:
+  *
+  * http://nadeausoftware.com/articles/2012/09/c_c_tip_how_get_physical_memory_size_system
+@@ -405,7 +621,7 @@ size_t zmalloc_get_memory_size(void) {
+     mib[0] = CTL_HW;
+ #if defined(HW_REALMEM)
+     mib[1] = HW_REALMEM;        /* FreeBSD. ----------------- */
+-#elif defined(HW_PYSMEM)
++#elif defined(HW_PHYSMEM)
+     mib[1] = HW_PHYSMEM;        /* Others. ------------------ */
+ #endif
+     unsigned int size = 0;      /* 32-bit */
+@@ -420,5 +636,3 @@ size_t zmalloc_get_memory_size(void) {
+     return 0L;          /* Unknown OS. */
+ #endif
+ }
+-
+-
+diff --git a/src/zmalloc.h b/src/zmalloc.h
+index a47ea6ccf..6e22e0fc5 100644
+--- a/src/zmalloc.h
++++ b/src/zmalloc.h
+@@ -55,6 +55,12 @@
+ #error "Newer version of jemalloc required"
+ #endif
+ 
++#elif defined(USE_MEMKIND)
++#define ZMALLOC_LIB "memkind"
++#include <memkind.h>
++#define HAVE_MALLOC_SIZE 1
++#define zmalloc_size(p) memkind_malloc_usable_size(NULL, p)
++
+ #elif defined(__APPLE__)
+ #include <malloc/malloc.h>
+ #define HAVE_MALLOC_SIZE 1
+@@ -63,25 +69,39 @@
+ 
+ #ifndef ZMALLOC_LIB
+ #define ZMALLOC_LIB "libc"
++#ifdef __GLIBC__
++#include <malloc.h>
++#define HAVE_MALLOC_SIZE 1
++#define zmalloc_size(p) malloc_usable_size(p)
++#endif
+ #endif
+ 
+ void *zmalloc(size_t size);
+ void *zcalloc(size_t size);
+ void *zrealloc(void *ptr, size_t size);
+ void zfree(void *ptr);
++void zfree_dram(void *ptr);
+ char *zstrdup(const char *s);
+ size_t zmalloc_used_memory(void);
+-void zmalloc_enable_thread_safeness(void);
++size_t zmalloc_used_pmem_memory(void);
+ void zmalloc_set_oom_handler(void (*oom_handler)(size_t));
+ float zmalloc_get_fragmentation_ratio(size_t rss);
+ size_t zmalloc_get_rss(void);
+-size_t zmalloc_get_private_dirty(void);
+-size_t zmalloc_get_smap_bytes_by_field(char *field);
++size_t zmalloc_get_private_dirty(long pid);
++size_t zmalloc_get_smap_bytes_by_field(char *field, long pid);
+ size_t zmalloc_get_memory_size(void);
+ void zlibc_free(void *ptr);
++void zmalloc_set_threshold(size_t threshold);
++size_t zmalloc_get_threshold(void);
++void *zmalloc_dram(size_t size);
++void *zcalloc_dram(size_t size);
++void *zrealloc_dram(void *ptr, size_t size);
+ 
+ #ifndef HAVE_MALLOC_SIZE
+ size_t zmalloc_size(void *ptr);
++size_t zmalloc_usable(void *ptr);
++#else
++#define zmalloc_usable(p) zmalloc_size(p)
+ #endif
+ 
+ #endif /* __ZMALLOC_H */
+-- 
+2.17.1
+
