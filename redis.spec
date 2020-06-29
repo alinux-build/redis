@@ -1,3 +1,4 @@
+%define alicloud_base_release 1
 %global _hardened_build 1
 %global with_perftools 0
 
@@ -18,7 +19,7 @@
 
 Name:              redis
 Version:           3.2.12
-Release:           2%{?dist}
+Release:           2.%{alicloud_base_release}%{?dist}
 Summary:           A persistent key-value database
 License:           BSD
 URL:               http://redis.io
@@ -270,6 +271,9 @@ fi
 
 
 %changelog
+* Mon Jun 29 2020 Jacob Wang <yungao.wjb@alibaba-inc.com> - 3.2.12-2.1
+- Rebuild for Alibaba Cloud Linux
+
 * Fri Oct 26 2018 Nathan Scott <nathans@redhat.com> - 3.2.12-2
 - Update network ordering in systemd service unit files (RHBZ #1636208)
 
