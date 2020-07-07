@@ -1,0 +1,23 @@
+From 743ba13a8382ff96b753fed93b60fa80e4f5a33d Mon Sep 17 00:00:00 2001
+From: kasiawasiuta <katarzyna.wasiuta@intel.com>
+Date: Tue, 10 Mar 2020 14:48:56 +0100
+Subject: [PATCH 03/23] Rules for merging PRs
+
+---
+ CONTRIBUTING | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/CONTRIBUTING b/CONTRIBUTING
+index becd3e8a3..f676ec774 100644
+--- a/CONTRIBUTING
++++ b/CONTRIBUTING
+@@ -25,4 +25,6 @@ Here you'll see if there is consensus about your idea.
+ 
+ 3. For minor fixes just open a pull request on Github.
+ 
++4. MemKeyDB has 4 core maintainers. Each patch must receive an approval from at least two core maintainers and pass all CI checks before it can be merged.
++
+ Thanks!
+-- 
+2.19.1.6.gb485710b
+

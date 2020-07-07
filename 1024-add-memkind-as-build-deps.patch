@@ -1,0 +1,53 @@
+From 9ae3ec7bd13ac4235855cae68a55b5826fce13ea Mon Sep 17 00:00:00 2001
+From: Caspar Zhang <caspar@linux.alibaba.com>
+Date: Tue, 7 Jul 2020 23:17:00 +0800
+Subject: [PATCH] add memkind as build deps
+
+Signed-off-by: Caspar Zhang <caspar@linux.alibaba.com>
+---
+ deps/Makefile | 8 ++++++++
+ src/Makefile  | 5 +++--
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/deps/Makefile b/deps/Makefile
+index 700867f3b..50f01a7e3 100644
+--- a/deps/Makefile
++++ b/deps/Makefile
+@@ -37,6 +37,7 @@ distclean:
+ 	-(cd linenoise && $(MAKE) clean) > /dev/null || true
+ 	-(cd lua && $(MAKE) clean) > /dev/null || true
+ 	-(cd jemalloc && [ -f Makefile ] && $(MAKE) distclean) > /dev/null || true
++	-(cd memkind && [ -f Makefile ] && $(MAKE) distclean) > /dev/null || true
+ 	-(rm -f .make-*)
+ 
+ .PHONY: distclean
+@@ -85,3 +86,10 @@ jemalloc: .make-prerequisites
+ 	cd jemalloc && $(MAKE) CFLAGS="$(JEMALLOC_CFLAGS)" LDFLAGS="$(JEMALLOC_LDFLAGS)" lib/libjemalloc.a
+ 
+ .PHONY: jemalloc
++
++memkind: .make-prerequisites
++	@printf '%b %b\n' $(MAKECOLOR)MAKE$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR)
++	cd memkind && ./autogen.sh && ARENA_LIMIT=1 MIN_LG_ALIGN=3 ./configure --disable-heap-manager
++	cd memkind && $(MAKE)
++
++.PHONY: memkind
+diff --git a/src/Makefile b/src/Makefile
+index c67f65103..4eb46f981 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -195,8 +195,9 @@ ifeq ($(BUILD_TLS),yes)
+ endif
+ 
+ ifeq ($(MALLOC),memkind)
+-	FINAL_CFLAGS+= -DUSE_MEMKIND
+-	FINAL_LIBS+= -lmemkind -ldaxctl
++	DEPENDENCY_TARGETS+= memkind
++	FINAL_CFLAGS+= -DUSE_MEMKIND -I../deps/memkind/include
++	FINAL_LIBS+= ../deps/memkind/.libs/libmemkind.a -ldaxctl -lnuma -ldl
+ endif
+ 
+ REDIS_CC=$(QUIET_CC)$(CC) $(FINAL_CFLAGS)
+-- 
+2.19.1.6.gb485710b
+

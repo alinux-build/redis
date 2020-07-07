@@ -1,0 +1,129 @@
+From fa7c58f52b5ecd10a0a80773864a4f23f23db8e7 Mon Sep 17 00:00:00 2001
+From: michalbiesek <michal.biesek@intel.com>
+Date: Thu, 9 Apr 2020 11:53:35 +0200
+Subject: [PATCH 10/23] Add memkind defrag implementation
+
+Co-authored-by: jschmieg <jakub.schmiegel@intel.com>
+---
+ src/config.c                 |  4 ++--
+ src/defrag.c                 | 18 ++++++++++++++----
+ src/zmalloc.c                | 19 +++++++++++++++++++
+ src/zmalloc.h                |  3 +++
+ tests/unit/memefficiency.tcl |  2 +-
+ 5 files changed, 39 insertions(+), 7 deletions(-)
+
+diff --git a/src/config.c b/src/config.c
+index 5fa75eb69..1afd0402b 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -1973,12 +1973,12 @@ static void numericConfigRewrite(typeData data, const char *name, struct rewrite
+ }
+ 
+ static int isValidActiveDefrag(int val, char **err) {
+-#ifndef HAVE_DEFRAG
++#if !defined(HAVE_DEFRAG) && !defined(HAVE_DEFRAG_MEMKIND)
+     if (val) {
+         *err = "Active defragmentation cannot be enabled: it "
+                "requires a Redis server compiled with a modified Jemalloc "
+                "like the one shipped by default with the Redis source "
+-               "distribution";
++               "distribution, or memkind";
+         return 0;
+     }
+ #else
+diff --git a/src/defrag.c b/src/defrag.c
+index 6e5296632..fe5bcedba 100644
+--- a/src/defrag.c
++++ b/src/defrag.c
+@@ -45,10 +45,6 @@
+  * pointers are worthwhile moving and which aren't */
+ int je_get_defrag_hint(void* ptr);
+ 
+-/* forward declarations*/
+-void defragDictBucketCallback(void *privdata, dictEntry **bucketref);
+-dictEntry* replaceSateliteDictKeyPtrAndOrDefragDictEntry(dict *d, sds oldkey, sds newkey, uint64_t hash, long *defragged);
+-
+ /* Defrag helper for generic allocations.
+  *
+  * returns NULL in case the allocatoin wasn't moved.
+@@ -71,6 +67,20 @@ void* activeDefragAlloc(void *ptr) {
+     zfree_no_tcache(ptr);
+     return newptr;
+ }
++#endif
++
++#ifdef HAVE_DEFRAG_MEMKIND
++void* activeDefragAlloc(void *ptr) {
++    void* newptr = memkind_defrag_reallocate(MEMKIND_DEFAULT, ptr);
++    if (!newptr) server.stat_active_defrag_misses++;
++    return newptr;
++}
++#endif
++
++#if defined(HAVE_DEFRAG) || defined(HAVE_DEFRAG_MEMKIND)
++/* forward declarations*/
++void defragDictBucketCallback(void *privdata, dictEntry **bucketref);
++dictEntry* replaceSateliteDictKeyPtrAndOrDefragDictEntry(dict *d, sds oldkey, sds newkey, uint64_t hash, long *defragged);
+ 
+ /*Defrag helper for sds strings
+  *
+diff --git a/src/zmalloc.c b/src/zmalloc.c
+index 20f65c2eb..04e2bbf9e 100644
+--- a/src/zmalloc.c
++++ b/src/zmalloc.c
+@@ -384,6 +384,25 @@ int jemalloc_purge() {
+     return -1;
+ }
+ 
++#elif defined(USE_MEMKIND)
++int zmalloc_get_allocator_info(size_t *allocated,
++                               size_t *active,
++                               size_t *resident) {
++    memkind_update_cached_stats();
++    memkind_get_stat(NULL, MEMKIND_STAT_TYPE_RESIDENT, resident);
++    memkind_get_stat(NULL, MEMKIND_STAT_TYPE_ACTIVE, active);
++    memkind_get_stat(NULL, MEMKIND_STAT_TYPE_ALLOCATED, allocated);
++    return 1;
++}
++
++void set_jemalloc_bg_thread(int enable) {
++    ((void)(enable));
++}
++
++int jemalloc_purge() {
++    return 0;
++}
++
+ #else
+ 
+ int zmalloc_get_allocator_info(size_t *allocated,
+diff --git a/src/zmalloc.h b/src/zmalloc.h
+index 458d73744..994dc53cc 100644
+--- a/src/zmalloc.h
++++ b/src/zmalloc.h
+@@ -82,6 +82,9 @@
+ #if defined(USE_JEMALLOC) && defined(JEMALLOC_FRAG_HINT)
+ #define HAVE_DEFRAG
+ #endif
++#if defined(USE_MEMKIND)
++#define HAVE_DEFRAG_MEMKIND
++#endif
+ 
+ void *zmalloc(size_t size);
+ void *zcalloc(size_t size);
+diff --git a/tests/unit/memefficiency.tcl b/tests/unit/memefficiency.tcl
+index 390bad192..1586baf82 100644
+--- a/tests/unit/memefficiency.tcl
++++ b/tests/unit/memefficiency.tcl
+@@ -38,7 +38,7 @@ start_server {tags {"memefficiency"}} {
+ 
+ run_solo {defrag} {
+ start_server {tags {"defrag"}} {
+-    if {[string match {*jemalloc*} [s mem_allocator]]} {
++    if {[string match {*jemalloc*} [s mem_allocator]] || [s mem_allocator] == "memkind"} {
+         test "Active defrag" {
+             r config set save "" ;# prevent bgsave from interfereing with save below
+             r config set hz 100
+-- 
+2.19.1.6.gb485710b
+

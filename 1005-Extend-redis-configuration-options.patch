@@ -1,0 +1,437 @@
+From 82f195aa703c0641f2ecd1ca9482947ecd39e615 Mon Sep 17 00:00:00 2001
+From: michalbiesek <michal.biesek@intel.com>
+Date: Mon, 17 Feb 2020 15:33:37 +0100
+Subject: [PATCH 05/23] Extend redis configuration options:
+
+- memory-alloc-policy is used to described how/if Persistent Memory is
+used
+
+static strategy
+- static-threshold parameter - const threshold from which alocation goes
+to PMEM
+
+dynamic strategy
+- dram-pmem-ratio parameter - the threshold will be dynamic in other
+words it will be automatically adjusted to fullfill expected dram-pmem-
+ratio
+- initial-dynamic-threshold - initial value of dynamic threshold
+- dynamic-threshold-min - minimum possible value of dynamic threshold
+---
+ redis.conf                   | 81 ++++++++++++++++++++++++++++++++----
+ src/Makefile                 |  2 +-
+ src/config.c                 | 43 +++++++++++++++++++
+ src/pmem.c                   | 51 +++++++++++++++++++++++
+ src/server.c                 |  1 +
+ src/server.h                 | 20 +++++++++
+ src/zmalloc.c                |  5 +++
+ src/zmalloc.h                |  1 +
+ tests/unit/introspection.tcl |  4 ++
+ 9 files changed, 199 insertions(+), 9 deletions(-)
+ create mode 100644 src/pmem.c
+
+diff --git a/redis.conf b/redis.conf
+index 1aa760599..1e3e739db 100644
+--- a/redis.conf
++++ b/redis.conf
+@@ -142,7 +142,7 @@ tcp-keepalive 300
+ # server to connected clients, masters or cluster peers.  These files should be
+ # PEM formatted.
+ #
+-# tls-cert-file redis.crt 
++# tls-cert-file redis.crt
+ # tls-key-file redis.key
+ 
+ # Configure a DH parameters file to enable Diffie-Hellman (DH) key exchange:
+@@ -744,7 +744,7 @@ replica-priority 100
+ # ACL LOG
+ #
+ # The ACL Log tracks failed commands and authentication events associated
+-# with ACLs. The ACL Log is useful to troubleshoot failed commands blocked 
++# with ACLs. The ACL Log is useful to troubleshoot failed commands blocked
+ # by ACLs. The ACL Log is stored in and consumes memory. There is no limit
+ # to its length.You can reclaim memory with ACL LOG RESET or set a maximum
+ # length below.
+@@ -1273,18 +1273,18 @@ lua-time-limit 5000
+ # cluster-replica-no-failover no
+ 
+ # This option, when set to yes, allows nodes to serve read traffic while the
+-# the cluster is in a down state, as long as it believes it owns the slots. 
++# the cluster is in a down state, as long as it believes it owns the slots.
+ #
+-# This is useful for two cases.  The first case is for when an application 
++# This is useful for two cases.  The first case is for when an application
+ # doesn't require consistency of data during node failures or network partitions.
+ # One example of this is a cache, where as long as the node has the data it
+-# should be able to serve it. 
++# should be able to serve it.
+ #
+-# The second use case is for configurations that don't meet the recommended  
+-# three shards but want to enable cluster mode and scale later. A 
++# The second use case is for configurations that don't meet the recommended
++# three shards but want to enable cluster mode and scale later. A
+ # master outage in a 1 or 2 shard configuration causes a read/write outage to the
+ # entire cluster without this option set, with it set there is only a write outage.
+-# Without a quorum of masters, slot ownership will not change automatically. 
++# Without a quorum of masters, slot ownership will not change automatically.
+ #
+ # cluster-allow-reads-when-down no
+ 
+@@ -1810,3 +1810,68 @@ jemalloc-bg-thread yes
+ #
+ # Set bgsave child process to cpu affinity 1,10,11
+ # bgsave_cpulist 1,10-11
++#
++############################### MEMORY ALLOCATION CONFIGURATION #############################
++#
++# Memory Allocation Policies allow modifying mechanism how heap memory is allocated via zmalloc()
++# function calls. It can target DRAM, Persistent Memory or both. In general, bigger allocations
++# should be stored in Persistent Memory which provides a higher capacity, while smaller and more
++# frequently used should be stored in DRAM.
++# When allocations are to be mixed on both types of memory, this can be defined with:
++#
++# threshold – allocations smaller than the threshold will target DRAM, equal and bigger
++# will target PMEM
++#
++# ratio – the application will be checking DRAM and PMEM utilization ratio and will adopt internal
++# threshold value to reach the defined ratio
++#
++# Redis supports four different Memory Allocation Policies:
++#
++# only-dram: use only DRAM - do not use Persistent Memory
++# only-pmem: use only Persistent Memory - do not use DRAM
++# threshold: use both Persistent Memory and DRAM - use threshold described by static-threshold
++# ratio: use both Persistent Memory and DRAM - use ratio described by dram-pmem-ratio
++#
++# By default Redis use only-dram configuration.
++memory-alloc-policy only-dram
++
++# --- THRESHOLD policy ---
++#
++# HOW IT WORKS?
++#
++# When Threshold policy is selected, application will check static-threshold parameter.
++# Allocation of the size smaller than this threshold goes to DRAM.
++# Allocation of the size equal or bigger than this threshold goes to Persistent Memory.
++# Parameter can be modified when application is running using CONFIG SET.
++#   Note: for static-threshold value equal 64 and typical SET workload with 1kb Strings values
++#         received DRAM:PMEM ratio is around 1:20
++
++# Minimum allocation size measured in bytes which goes to Persistent Memory
++static-threshold 64
++
++# --- RATIO policy ---
++#
++# HOW IT WORKS?
++#
++# Application allocates part of data in DRAM and part in Persistent Memory based on value
++# of internal dynamic threshold and dram-pmem-ratio. Application frequently compares DRAM
++# and Persistent Memory utilization and modifies value of internal dynamic threshold by
++# increasing or decreasing it to achieve expected dram-pmem-ratio. Internal dynamic threshold
++# have have minimum possible limit defined by dynamic-threshold-min.
++
++# The syntax of dram-pmem-ratio directive is the following:
++#
++# dram-pmem-ratio <dram_value> <pmem_value>
++#
++# Expected proportion of memory placement between DRAM and Persistent Memory.
++# Real DRAM:PMEM ratio depends on workload and its variability.
++# dram_value and pmem_value are values from range <1,INT_MAX>
++# In the example below the behavior will be to:
++# Place 25% of all memory in DRAM and 75% in Persistent Memory
++dram-pmem-ratio 1 3
++
++# Initial value of dynamic threshold
++initial-dynamic-threshold 64
++
++# Minimum value of dynamic threshold
++dynamic-threshold-min 24
+diff --git a/src/Makefile b/src/Makefile
+index b8c05c32b..535701b18 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -216,7 +216,7 @@ endif
+ 
+ REDIS_SERVER_NAME=redis-server
+ REDIS_SENTINEL_NAME=redis-sentinel
+-REDIS_SERVER_OBJ=adlist.o quicklist.o ae.o anet.o dict.o server.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o pubsub.o multi.o debug.o sort.o intset.o syncio.o cluster.o crc16.o endianconv.o slowlog.o scripting.o bio.o rio.o rand.o memtest.o crcspeed.o crc64.o bitops.o sentinel.o notify.o setproctitle.o blocked.o hyperloglog.o latency.o sparkline.o redis-check-rdb.o redis-check-aof.o geo.o lazyfree.o module.o evict.o expire.o geohash.o geohash_helper.o childinfo.o defrag.o siphash.o rax.o t_stream.o listpack.o localtime.o lolwut.o lolwut5.o lolwut6.o acl.o gopher.o tracking.o connection.o tls.o sha256.o timeout.o setcpuaffinity.o
++REDIS_SERVER_OBJ=adlist.o quicklist.o ae.o anet.o dict.o server.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o pubsub.o multi.o debug.o sort.o intset.o syncio.o cluster.o crc16.o endianconv.o slowlog.o scripting.o bio.o rio.o rand.o memtest.o crcspeed.o crc64.o bitops.o sentinel.o notify.o setproctitle.o blocked.o hyperloglog.o latency.o sparkline.o redis-check-rdb.o redis-check-aof.o geo.o lazyfree.o module.o evict.o expire.o geohash.o geohash_helper.o childinfo.o defrag.o siphash.o rax.o t_stream.o listpack.o localtime.o lolwut.o lolwut5.o lolwut6.o acl.o gopher.o tracking.o connection.o tls.o sha256.o timeout.o setcpuaffinity.o pmem.o
+ REDIS_CLI_NAME=redis-cli
+ REDIS_CLI_OBJ=anet.o adlist.o dict.o redis-cli.o zmalloc.o release.o ae.o crcspeed.o crc64.o siphash.o crc16.o
+ REDIS_BENCHMARK_NAME=redis-benchmark
+diff --git a/src/config.c b/src/config.c
+index 64854592c..5fa75eb69 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -91,6 +91,14 @@ configEnum aof_fsync_enum[] = {
+     {NULL, 0}
+ };
+ 
++configEnum memory_alloc_policy_enum[] = {
++    {"only-dram", MEM_POLICY_ONLY_DRAM},
++    {"only-pmem", MEM_POLICY_ONLY_PMEM},
++    {"threshold", MEM_POLICY_THRESHOLD},
++    {"ratio", MEM_POLICY_RATIO},
++    {NULL, 0}
++};
++
+ configEnum repl_diskless_load_enum[] = {
+     {"disabled", REPL_DISKLESS_LOAD_DISABLED},
+     {"on-empty-db", REPL_DISKLESS_LOAD_WHEN_DB_EMPTY},
+@@ -373,6 +381,14 @@ void loadServerConfigFromString(char *config) {
+             } else if (argc == 2 && !strcasecmp(argv[1],"")) {
+                 resetServerSaveParams();
+             }
++        } else if (!strcasecmp(argv[0],"dram-pmem-ratio") && argc == 3) {
++                int dram = atoi(argv[1]);
++                int pmem = atoi(argv[2]);
++                if (dram == 0 || pmem == 0) {
++                  err = "Invalid dram-pmem-ratio parameters"; goto loaderr;
++                }
++                server.dram_pmem_ratio.dram_val = dram;
++                server.dram_pmem_ratio.pmem_val = pmem;
+         } else if (!strcasecmp(argv[0],"dir") && argc == 2) {
+             if (chdir(argv[1]) == -1) {
+                 serverLog(LL_WARNING,"Can't chdir to '%s': %s",
+@@ -518,6 +534,12 @@ void loadServerConfigFromString(char *config) {
+         goto loaderr;
+     }
+ 
++    if (server.dram_pmem_ratio.pmem_val == 0 && server.dram_pmem_ratio.dram_val == 0 &&
++        server.memory_alloc_policy == MEM_POLICY_RATIO) {
++        err = "dram-pmem-ratio must be defined for ratio memory allocation policy";
++        goto loaderr;
++    }
++
+     sdsfreesplitres(lines,totlines);
+     return;
+ 
+@@ -867,6 +889,13 @@ void configGetCommand(client *c) {
+         sdsfree(buf);
+         matches++;
+     }
++    if  (stringmatch(pattern,"dram-pmem-ratio",1)) {
++        char buf[32];
++        snprintf(buf,sizeof(buf),"%d %d", server.dram_pmem_ratio.dram_val, server.dram_pmem_ratio.pmem_val);
++        addReplyBulkCString(c,"dram-pmem-ratio");
++        addReplyBulkCString(c,buf);
++        matches++;
++    }
+     if (stringmatch(pattern,"unixsocketperm",1)) {
+         char buf[32];
+         snprintf(buf,sizeof(buf),"%o",server.unixsocketperm);
+@@ -2037,6 +2066,16 @@ static int updateAppendonly(int val, int prev, char **err) {
+     return 1;
+ }
+ 
++static int updateStaticthreshold(long long val, long long prev, char **err) {
++    UNUSED(prev);
++    UNUSED(err);
++    if (server.memory_alloc_policy == MEM_POLICY_THRESHOLD) {
++        zmalloc_set_threshold((size_t)val);
++    }
++
++    return 1;
++}
++
+ static int updateMaxclients(long long val, long long prev, char **err) {
+     /* Try to check if the OS is capable of supporting so many FDs. */
+     if (val > prev) {
+@@ -2145,6 +2184,7 @@ standardConfig configs[] = {
+     createEnumConfig("loglevel", NULL, MODIFIABLE_CONFIG, loglevel_enum, server.verbosity, LL_NOTICE, NULL, NULL),
+     createEnumConfig("maxmemory-policy", NULL, MODIFIABLE_CONFIG, maxmemory_policy_enum, server.maxmemory_policy, MAXMEMORY_NO_EVICTION, NULL, NULL),
+     createEnumConfig("appendfsync", NULL, MODIFIABLE_CONFIG, aof_fsync_enum, server.aof_fsync, AOF_FSYNC_EVERYSEC, NULL, NULL),
++    createEnumConfig("memory-alloc-policy", NULL, IMMUTABLE_CONFIG, memory_alloc_policy_enum, server.memory_alloc_policy, MEM_POLICY_ONLY_DRAM, NULL, NULL),
+ 
+     /* Integer configs */
+     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.dbnum, 16, INTEGER_CONFIG, NULL, NULL),
+@@ -2181,6 +2221,9 @@ standardConfig configs[] = {
+ 
+     /* Unsigned int configs */
+     createUIntConfig("maxclients", NULL, MODIFIABLE_CONFIG, 1, UINT_MAX, server.maxclients, 10000, INTEGER_CONFIG, NULL, updateMaxclients),
++    createUIntConfig("initial-dynamic-threshold", NULL, IMMUTABLE_CONFIG, 0, UINT_MAX, server.initial_dynamic_threshold, 64, INTEGER_CONFIG, NULL, NULL),
++    createUIntConfig("dynamic-threshold-min", NULL, IMMUTABLE_CONFIG, 0, UINT_MAX, server.dynamic_threshold_min, 24, INTEGER_CONFIG, NULL, NULL),
++    createUIntConfig("static-threshold", NULL, MODIFIABLE_CONFIG, 0, UINT_MAX, server.static_threshold, 64, INTEGER_CONFIG, NULL, updateStaticthreshold),
+ 
+     /* Unsigned Long configs */
+     createULongConfig("active-defrag-max-scan-fields", NULL, MODIFIABLE_CONFIG, 1, LONG_MAX, server.active_defrag_max_scan_fields, 1000, INTEGER_CONFIG, NULL, NULL), /* Default: keys with more than 1000 fields will be processed separately */
+diff --git a/src/pmem.c b/src/pmem.c
+new file mode 100644
+index 000000000..b01259d60
+--- /dev/null
++++ b/src/pmem.c
+@@ -0,0 +1,51 @@
++/* pmem.c - Persistent Memory interface
++ *
++ * Copyright (c) 2020, Intel Corporation
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ *   * Redistributions of source code must start the above copyright notice,
++ *     this quicklist of conditions and the following disclaimer.
++ *   * Redistributions in binary form must reproduce the above copyright
++ *     notice, this quicklist of conditions and the following disclaimer in the
++ *     documentation and/or other materials provided with the distribution.
++ *   * Neither the name of Redis nor the names of its contributors may be used
++ *     to endorse or promote products derived from this software without
++ *     specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ */
++#include "server.h"
++
++/* Initialize the pmem threshold. */
++void pmemThresholdInit(void)
++{
++    switch(server.memory_alloc_policy) {
++        case MEM_POLICY_ONLY_DRAM:
++            zmalloc_set_threshold(UINT_MAX);
++            break;
++        case MEM_POLICY_ONLY_PMEM:
++            zmalloc_set_threshold(0U);
++            break;
++        case MEM_POLICY_THRESHOLD:
++            zmalloc_set_threshold(server.static_threshold);
++            break;
++        case MEM_POLICY_RATIO:
++            zmalloc_set_threshold(server.initial_dynamic_threshold);
++            break;
++        default:
++            serverAssert(NULL);
++    }
++}
+diff --git a/src/server.c b/src/server.c
+index e8e711240..66a377465 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -2941,6 +2941,7 @@ void initServer(void) {
+     scriptingInit(1);
+     slowlogInit();
+     latencyMonitorInit();
++    pmemThresholdInit();
+ }
+ 
+ /* Some steps in server initialization need to be done last (after modules
+diff --git a/src/server.h b/src/server.h
+index a08585292..2d39c1772 100644
+--- a/src/server.h
++++ b/src/server.h
+@@ -478,6 +478,12 @@ typedef long long ustime_t; /* microsecond time type. */
+ #define REDISMODULE_AUX_BEFORE_RDB (1<<0)
+ #define REDISMODULE_AUX_AFTER_RDB (1<<1)
+ 
++/* Memory allocation policy states */
++#define MEM_POLICY_ONLY_DRAM 0          /* only use DRAM */
++#define MEM_POLICY_ONLY_PMEM 1          /* only use PMEM */
++#define MEM_POLICY_RATIO     2          /* use DRAM and PMEM - ratio variant*/
++#define MEM_POLICY_THRESHOLD 3          /* use DRAM and PMEM - threshold variant*/
++
+ struct RedisModule;
+ struct RedisModuleIO;
+ struct RedisModuleDigest;
+@@ -907,6 +913,11 @@ typedef struct clientBufferLimitsConfig {
+     time_t soft_limit_seconds;
+ } clientBufferLimitsConfig;
+ 
++typedef struct ratioDramPmemConfig {
++    int pmem_val;
++    int dram_val;
++} ratioDramPmemConfig;
++
+ extern clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT];
+ 
+ /* The redisOp structure defines a Redis Operation, that is an instance of
+@@ -1328,6 +1339,12 @@ struct redisServer {
+     int lfu_log_factor;             /* LFU logarithmic counter factor. */
+     int lfu_decay_time;             /* LFU counter decay factor. */
+     long long proto_max_bulk_len;   /* Protocol bulk length maximum size. */
++    /* PMEM */
++    int memory_alloc_policy;                  /* Policy for memory allocation */
++    unsigned int static_threshold;            /* Persistent Memory static threshold */
++    unsigned int initial_dynamic_threshold;   /* Persistent Memory initial dynamic threshold */
++    unsigned int dynamic_threshold_min;       /* Minimum value of dynamic threshold */
++    ratioDramPmemConfig dram_pmem_ratio;      /* DRAM/Persistent Memory ratio */
+     /* Blocked clients */
+     unsigned int blocked_clients;   /* # of clients executing a blocking cmd.*/
+     unsigned int blocked_clients_by_type[BLOCKED_NUM];
+@@ -2193,6 +2210,9 @@ uint64_t dictSdsHash(const void *key);
+ int dictSdsKeyCompare(void *privdata, const void *key1, const void *key2);
+ void dictSdsDestructor(void *privdata, void *val);
+ 
++/* pmem.c - Handling Persistent Memory */
++void pmemThresholdInit(void);
++
+ /* Git SHA1 */
+ char *redisGitSHA1(void);
+ char *redisGitDirty(void);
+diff --git a/src/zmalloc.c b/src/zmalloc.c
+index 639a5fe2b..81e53ab8f 100644
+--- a/src/zmalloc.c
++++ b/src/zmalloc.c
+@@ -28,6 +28,7 @@
+  * POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include <limits.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <stdint.h>
+@@ -83,6 +84,7 @@ void zlibc_free(void *ptr) {
+     atomicDecr(used_memory,__n); \
+ } while(0)
+ 
++static size_t pmem_threshold = UINT_MAX;
+ static size_t used_memory = 0;
+ pthread_mutex_t used_memory_mutex = PTHREAD_MUTEX_INITIALIZER;
+ 
+@@ -226,6 +228,9 @@ size_t zmalloc_used_memory(void) {
+ void zmalloc_set_oom_handler(void (*oom_handler)(size_t)) {
+     zmalloc_oom_handler = oom_handler;
+ }
++void zmalloc_set_threshold(size_t threshold) {
++    pmem_threshold = threshold;
++}
+ 
+ /* Get the RSS information in an OS-specific way.
+  *
+diff --git a/src/zmalloc.h b/src/zmalloc.h
+index b136a910d..5ddb22337 100644
+--- a/src/zmalloc.h
++++ b/src/zmalloc.h
+@@ -92,6 +92,7 @@ size_t zmalloc_get_private_dirty(long pid);
+ size_t zmalloc_get_smap_bytes_by_field(char *field, long pid);
+ size_t zmalloc_get_memory_size(void);
+ void zlibc_free(void *ptr);
++void zmalloc_set_threshold(size_t threshold);
+ 
+ #ifdef HAVE_DEFRAG
+ void zfree_no_tcache(void *ptr);
+diff --git a/tests/unit/introspection.tcl b/tests/unit/introspection.tcl
+index b60ca0d48..c874498d8 100644
+--- a/tests/unit/introspection.tcl
++++ b/tests/unit/introspection.tcl
+@@ -98,6 +98,10 @@ start_server {tags {"introspection"}} {
+             bio_cpulist
+             aof_rewrite_cpulist
+             bgsave_cpulist
++            dram-pmem-ratio
++            memory-alloc-policy
++            initial-dynamic-threshold
++            dynamic-threshold-min
+         }
+ 
+         set configs {}
+-- 
+2.19.1.6.gb485710b
+

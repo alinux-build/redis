@@ -1,0 +1,146 @@
+From 505aafb9c80f4d9d457a8e5de64c12c7d9782fb6 Mon Sep 17 00:00:00 2001
+From: michalbiesek <michal.biesek@intel.com>
+Date: Fri, 29 May 2020 11:18:58 +0200
+Subject: [PATCH 23/23] Add hashtable-on-dram option
+
+- set to no to keep expected dram-pmem ratio for small object size e.g.
+32 bytes for 1:16 ratio
+- restore generic zfree mechanism in dict module - Hashtable is
+initialized before reading config - so it could be on dram or pmem,
+despite the selected hashtable-on-dram option
+
+Co-authored-by: jschmieg <jakub.schmiegel@intel.com>
+---
+ redis.conf                   |  3 +++
+ src/config.c                 |  1 +
+ src/dict.c                   | 11 ++++++++---
+ src/dict.h                   |  1 +
+ src/server.c                 |  1 +
+ src/server.h                 |  1 +
+ tests/unit/introspection.tcl |  1 +
+ 7 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/redis.conf b/redis.conf
+index e083dee8d..b488d00f6 100644
+--- a/redis.conf
++++ b/redis.conf
+@@ -1882,3 +1882,6 @@ dynamic-threshold-max 10000
+ 
+ # DRAM/PMEM ratio period measured in miliseconds
+ memory-ratio-check-period 100
++
++# Keep hashtable structure always on DRAM
++hashtable-on-dram yes
+diff --git a/src/config.c b/src/config.c
+index 46b0a2b62..8c5b076ec 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -2169,6 +2169,7 @@ standardConfig configs[] = {
+     createBoolConfig("cluster-enabled", NULL, IMMUTABLE_CONFIG, server.cluster_enabled, 0, NULL, NULL),
+     createBoolConfig("appendonly", NULL, MODIFIABLE_CONFIG, server.aof_enabled, 0, NULL, updateAppendonly),
+     createBoolConfig("cluster-allow-reads-when-down", NULL, MODIFIABLE_CONFIG, server.cluster_allow_reads_when_down, 0, NULL, NULL),
++    createBoolConfig("hashtable-on-dram", NULL, IMMUTABLE_CONFIG, server.hashtable_on_dram, 1, NULL, NULL),
+ 
+ 
+     /* String Configs */
+diff --git a/src/dict.c b/src/dict.c
+index 61dccb4a1..3ec0a2a44 100644
+--- a/src/dict.c
++++ b/src/dict.c
+@@ -61,6 +61,7 @@
+  * the number of elements and the buckets > dict_force_resize_ratio. */
+ static int dict_can_resize = 1;
+ static unsigned int dict_force_resize_ratio = 5;
++static int dict_always_on_dram = 1;
+ 
+ /* -------------------------- private prototypes ---------------------------- */
+ 
+@@ -81,6 +82,10 @@ uint8_t *dictGetHashFunctionSeed(void) {
+     return dict_hash_function_seed;
+ }
+ 
++void dictSetAllocPolicy(int policy) {
++    dict_always_on_dram = policy;
++}
++
+ /* The default hashing function uses SipHash implementation
+  * in siphash.c. */
+ 
+@@ -160,7 +165,7 @@ int dictExpand(dict *d, unsigned long size)
+     /* Allocate the new hash table and initialize all pointers to NULL */
+     n.size = realsize;
+     n.sizemask = realsize-1;
+-    n.table = zcalloc_dram(realsize*sizeof(dictEntry*));
++    n.table = (dict_always_on_dram) ? zcalloc_dram(realsize*sizeof(dictEntry*)) : zcalloc(realsize*sizeof(dictEntry*));
+     n.used = 0;
+ 
+     /* Is this the first initialization? If so it's not really a rehashing
+@@ -219,7 +224,7 @@ int dictRehash(dict *d, int n) {
+ 
+     /* Check if we already rehashed the whole table... */
+     if (d->ht[0].used == 0) {
+-        zfree_dram(d->ht[0].table);
++        zfree(d->ht[0].table);
+         d->ht[0] = d->ht[1];
+         _dictReset(&d->ht[1]);
+         d->rehashidx = -1;
+@@ -459,7 +464,7 @@ int _dictClear(dict *d, dictht *ht, void(callback)(void *)) {
+         }
+     }
+     /* Free the table and the allocated cache structure */
+-    zfree_dram(ht->table);
++    zfree(ht->table);
+     /* Re-initialize the table */
+     _dictReset(ht);
+     return DICT_OK; /* never fails */
+diff --git a/src/dict.h b/src/dict.h
+index dec60f637..ac68ec486 100644
+--- a/src/dict.h
++++ b/src/dict.h
+@@ -178,6 +178,7 @@ int dictRehash(dict *d, int n);
+ int dictRehashMilliseconds(dict *d, int ms);
+ void dictSetHashFunctionSeed(uint8_t *seed);
+ uint8_t *dictGetHashFunctionSeed(void);
++void dictSetAllocPolicy(int policy);
+ unsigned long dictScan(dict *d, unsigned long v, dictScanFunction *fn, dictScanBucketFunction *bucketfn, void *privdata);
+ uint64_t dictGetHash(dict *d, const void *key);
+ dictEntry **dictFindEntryRefByPtrAndHash(dict *d, const void *oldptr, uint64_t hash);
+diff --git a/src/server.c b/src/server.c
+index e6f2e71cd..df246bd65 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -2945,6 +2945,7 @@ void initServer(void) {
+     slowlogInit();
+     latencyMonitorInit();
+     pmemThresholdInit();
++    dictSetAllocPolicy(server.hashtable_on_dram);
+ }
+ 
+ /* Some steps in server initialization need to be done last (after modules
+diff --git a/src/server.h b/src/server.h
+index 7f2972fce..ad8fa7bff 100644
+--- a/src/server.h
++++ b/src/server.h
+@@ -1348,6 +1348,7 @@ struct redisServer {
+     ratioDramPmemConfig dram_pmem_ratio;      /* DRAM/Persistent Memory ratio */
+     double target_pmem_dram_ratio;            /* Target PMEM/DRAM ratio */
+     int ratio_check_period;                   /* Period of checking ratio in Cron*/
++    int hashtable_on_dram;                    /* Keep hashtable always on DRAM */
+     /* Blocked clients */
+     unsigned int blocked_clients;   /* # of clients executing a blocking cmd.*/
+     unsigned int blocked_clients_by_type[BLOCKED_NUM];
+diff --git a/tests/unit/introspection.tcl b/tests/unit/introspection.tcl
+index cd20e7b8c..3d5fcd3bc 100644
+--- a/tests/unit/introspection.tcl
++++ b/tests/unit/introspection.tcl
+@@ -104,6 +104,7 @@ start_server {tags {"introspection"}} {
+             dynamic-threshold-min
+             dynamic-threshold-max
+             memory-ratio-check-period
++            hashtable-on-dram
+         }
+ 
+         set configs {}
+-- 
+2.19.1.6.gb485710b
+

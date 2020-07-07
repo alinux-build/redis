@@ -1,0 +1,37 @@
+From 36a7e635cadc2211903bb3f7e4c6883cbe29070a Mon Sep 17 00:00:00 2001
+From: michalbiesek <michal.biesek@intel.com>
+Date: Tue, 19 May 2020 20:47:33 +0200
+Subject: [PATCH 20/23] Provide information about memkind
+
+- which version should be used
+- which configure options should be set
+
+Co-authored-by: jschmieg <jakub.schmiegel@intel.com>
+---
+ README.md | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/README.md b/README.md
+index 3eb2827fe..f1017ee18 100644
+--- a/README.md
++++ b/README.md
+@@ -9,6 +9,16 @@ The data stored on the medium is volatile and the persistency is preserved with
+ 
+ Building MemKeyDB
+ --------------
++You will need to install the following required packages on the build system:
++* libdaxctl-devel (v66 or later) -- required by memkind
++* memkind ([v1.10.1-rc2](https://github.com/memkind/memkind/releases/tag/v1.10.1-rc2) or later) - with custom build options described below
++
++To install memkind please call:
++
++    % ./autogen.sh
++    % ARENA_LIMIT=1 MIN_LG_ALIGN=3 ./configure --disable-heap-manager
++    % make
++    % make install
+ 
+ It is as simple as:
+ 
+-- 
+2.19.1.6.gb485710b
+

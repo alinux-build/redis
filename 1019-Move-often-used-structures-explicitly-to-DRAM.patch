@@ -1,0 +1,613 @@
+From c03d2a167e7f0fe63eaaed713a9c78360c5b04b9 Mon Sep 17 00:00:00 2001
+From: jschmieg <jakub.schmiegel@intel.com>
+Date: Tue, 19 May 2020 21:18:38 +0200
+Subject: [PATCH 19/23] Move often used structures explicitly to DRAM
+
+- structures like e.g. client buffers, iterators should stay
+on DRAM, while they are often allocated and freed
+
+Co-authored-by: michalbiesek <michal.biesek@intel.com>
+---
+ src/adlist.c     | 108 +++++++++++++++++++++++++++++++++++++++--------
+ src/adlist.h     |   5 +++
+ src/dict.c       |  10 ++---
+ src/module.c     |   2 +-
+ src/networking.c |  46 ++++++++++----------
+ src/object.c     |  21 +++++++--
+ src/sds.c        |  22 +++++++++-
+ src/sds.h        |   1 +
+ src/sdsalloc.h   |   1 +
+ src/server.h     |   1 +
+ 10 files changed, 165 insertions(+), 52 deletions(-)
+
+diff --git a/src/adlist.c b/src/adlist.c
+index 0fedc0729..a842aa369 100644
+--- a/src/adlist.c
++++ b/src/adlist.c
+@@ -33,16 +33,15 @@
+ #include "adlist.h"
+ #include "zmalloc.h"
+ 
+-/* Create a new list. The created list can be freed with
+- * AlFreeList(), but private value of every node need to be freed
+- * by the user before to call AlFreeList().
+- *
+- * On error, NULL is returned. Otherwise the pointer to the new list. */
+-list *listCreate(void)
++#define LIST_GENERAL_VARIANT  0
++#define LIST_DRAM_VARIANT     1
++
++static list *_listCreate(int on_dram)
+ {
+     struct list *list;
+ 
+-    if ((list = zmalloc(sizeof(*list))) == NULL)
++    list = (on_dram == LIST_DRAM_VARIANT) ? zmalloc_dram(sizeof(*list)) : zmalloc(sizeof(*list));
++    if (list == NULL)
+         return NULL;
+     list->head = list->tail = NULL;
+     list->len = 0;
+@@ -52,8 +51,26 @@ list *listCreate(void)
+     return list;
+ }
+ 
++/* Create a new list. The created list can be freed with
++ * AlFreeList(), but private value of every node need to be freed
++ * by the user before to call AlFreeList().
++ *
++ * On error, NULL is returned. Otherwise the pointer to the new list. */
++list *listCreate(void) {
++    return _listCreate(LIST_GENERAL_VARIANT);
++}
++
++/* Create a new list on DRAM. The created list can be freed with
++ * AlFreeList(), but private value of every node need to be freed
++ * by the user before to call AlFreeList().
++ *
++ * On error, NULL is returned. Otherwise the pointer to the new list. */
++list *listCreateDRAM(void) {
++    return _listCreate(LIST_DRAM_VARIANT);
++}
++
+ /* Remove all the elements from the list without destroying the list itself. */
+-void listEmpty(list *list)
++static void _listEmpty(list *list, int on_dram)
+ {
+     unsigned long len;
+     listNode *current, *next;
+@@ -63,13 +80,23 @@ void listEmpty(list *list)
+     while(len--) {
+         next = current->next;
+         if (list->free) list->free(current->value);
+-        zfree(current);
++        if (on_dram == LIST_DRAM_VARIANT) zfree_dram(current); else zfree(current);
+         current = next;
+     }
+     list->head = list->tail = NULL;
+     list->len = 0;
+ }
+ 
++/* Remove all the elements from the list without destroying the list itself. */
++void listEmpty(list *list) {
++    _listEmpty(list, LIST_GENERAL_VARIANT);
++}
++
++/* Remove all the elements from the list on DRAM without destroying the list itself. */
++void listEmptyDRAM(list *list) {
++    _listEmpty(list, LIST_DRAM_VARIANT);
++}
++
+ /* Free the whole list.
+  *
+  * This function can't fail. */
+@@ -79,17 +106,26 @@ void listRelease(list *list)
+     zfree(list);
+ }
+ 
++/* Free the whole list from DRAM.
++ *
++ * This function can't fail. */
++void listReleaseDRAM(list *list)
++{
++    listEmpty(list);
++    zfree_dram(list);
++}
++
+ /* Add a new node to the list, to head, containing the specified 'value'
+  * pointer as value.
+  *
+  * On error, NULL is returned and no operation is performed (i.e. the
+  * list remains unaltered).
+  * On success the 'list' pointer you pass to the function is returned. */
+-list *listAddNodeHead(list *list, void *value)
++static list *_listAddNodeHead(list *list, void *value, int on_dram)
+ {
+     listNode *node;
+-
+-    if ((node = zmalloc(sizeof(*node))) == NULL)
++    node = (on_dram == LIST_DRAM_VARIANT) ? zmalloc_dram(sizeof(*node)) : zmalloc(sizeof(*node));
++    if (node == NULL)
+         return NULL;
+     node->value = value;
+     if (list->len == 0) {
+@@ -105,6 +141,28 @@ list *listAddNodeHead(list *list, void *value)
+     return list;
+ }
+ 
++/* Add a new node to the list, to head, containing the specified 'value'
++ * pointer as value.
++ *
++ * On error, NULL is returned and no operation is performed (i.e. the
++ * list remains unaltered).
++ * On success the 'list' pointer you pass to the function is returned. */
++list *listAddNodeHead(list *list, void *value)
++{
++    return _listAddNodeHead(list, value, LIST_GENERAL_VARIANT);
++}
++
++/* Add a new node to the list on DRAM, to head, containing the specified 'value'
++ * pointer as value.
++ *
++ * On error, NULL is returned and no operation is performed (i.e. the
++ * list remains unaltered).
++ * On success the 'list' pointer you pass to the function is returned. */
++list *listAddNodeHeadDRAM(list *list, void *value)
++{
++    return _listAddNodeHead(list, value, LIST_DRAM_VARIANT);
++}
++
+ /* Add a new node to the list, to tail, containing the specified 'value'
+  * pointer as value.
+  *
+@@ -160,11 +218,7 @@ list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
+     return list;
+ }
+ 
+-/* Remove the specified node from the specified list.
+- * It's up to the caller to free the private value of the node.
+- *
+- * This function can't fail. */
+-void listDelNode(list *list, listNode *node)
++static void _listDelNode(list *list, listNode *node, int on_dram)
+ {
+     if (node->prev)
+         node->prev->next = node->next;
+@@ -175,10 +229,28 @@ void listDelNode(list *list, listNode *node)
+     else
+         list->tail = node->prev;
+     if (list->free) list->free(node->value);
+-    zfree(node);
++    if (on_dram == LIST_DRAM_VARIANT) zfree_dram(node); else zfree(node);
+     list->len--;
+ }
+ 
++/* Remove the specified node from the specified list.
++ * It's up to the caller to free the private value of the node.
++ *
++ * This function can't fail. */
++void listDelNode(list *list, listNode *node)
++{
++    _listDelNode(list, node, LIST_GENERAL_VARIANT);
++}
++
++/* Remove the specified node from DRAM the specified list.
++ * It's up to the caller to free the private value of the node.
++ *
++ * This function can't fail. */
++void listDelNodeDRAM(list *list, listNode *node)
++{
++    _listDelNode(list, node, LIST_DRAM_VARIANT);
++}
++
+ /* Returns a list iterator 'iter'. After the initialization every
+  * call to listNext() will return the next element of the list.
+  *
+diff --git a/src/adlist.h b/src/adlist.h
+index dd8a8d693..83fe8c63c 100644
+--- a/src/adlist.h
++++ b/src/adlist.h
+@@ -71,12 +71,17 @@ typedef struct list {
+ 
+ /* Prototypes */
+ list *listCreate(void);
++list *listCreateDRAM(void);
+ void listRelease(list *list);
++void listReleaseDRAM(list *list);
+ void listEmpty(list *list);
++void listEmptyDRAM(list *list);
+ list *listAddNodeHead(list *list, void *value);
++list *listAddNodeHeadDRAM(list *list, void *value);
+ list *listAddNodeTail(list *list, void *value);
+ list *listInsertNode(list *list, listNode *old_node, void *value, int after);
+ void listDelNode(list *list, listNode *node);
++void listDelNodeDRAM(list *list, listNode *node);
+ listIter *listGetIterator(list *list, int direction);
+ listNode *listNext(listIter *iter);
+ void listReleaseIterator(listIter *iter);
+diff --git a/src/dict.c b/src/dict.c
+index 45aab66f9..61dccb4a1 100644
+--- a/src/dict.c
++++ b/src/dict.c
+@@ -160,7 +160,7 @@ int dictExpand(dict *d, unsigned long size)
+     /* Allocate the new hash table and initialize all pointers to NULL */
+     n.size = realsize;
+     n.sizemask = realsize-1;
+-    n.table = zcalloc(realsize*sizeof(dictEntry*));
++    n.table = zcalloc_dram(realsize*sizeof(dictEntry*));
+     n.used = 0;
+ 
+     /* Is this the first initialization? If so it's not really a rehashing
+@@ -219,7 +219,7 @@ int dictRehash(dict *d, int n) {
+ 
+     /* Check if we already rehashed the whole table... */
+     if (d->ht[0].used == 0) {
+-        zfree(d->ht[0].table);
++        zfree_dram(d->ht[0].table);
+         d->ht[0] = d->ht[1];
+         _dictReset(&d->ht[1]);
+         d->rehashidx = -1;
+@@ -459,7 +459,7 @@ int _dictClear(dict *d, dictht *ht, void(callback)(void *)) {
+         }
+     }
+     /* Free the table and the allocated cache structure */
+-    zfree(ht->table);
++    zfree_dram(ht->table);
+     /* Re-initialize the table */
+     _dictReset(ht);
+     return DICT_OK; /* never fails */
+@@ -541,7 +541,7 @@ long long dictFingerprint(dict *d) {
+ 
+ dictIterator *dictGetIterator(dict *d)
+ {
+-    dictIterator *iter = zmalloc(sizeof(*iter));
++    dictIterator *iter = zmalloc_dram(sizeof(*iter));
+ 
+     iter->d = d;
+     iter->table = 0;
+@@ -602,7 +602,7 @@ void dictReleaseIterator(dictIterator *iter)
+         else
+             assert(iter->fingerprint == dictFingerprint(iter->d));
+     }
+-    zfree(iter);
++    zfree_dram(iter);
+ }
+ 
+ /* Return a random entry from the hash table. Useful to
+diff --git a/src/module.c b/src/module.c
+index e3a338dad..96481b92c 100644
+--- a/src/module.c
++++ b/src/module.c
+@@ -4674,7 +4674,7 @@ void moduleHandleBlockedClients(void) {
+                 !(c->flags & CLIENT_PENDING_WRITE))
+             {
+                 c->flags |= CLIENT_PENDING_WRITE;
+-                listAddNodeHead(server.clients_pending_write,c);
++                listAddNodeHeadDRAM(server.clients_pending_write,c);
+             }
+         }
+ 
+diff --git a/src/networking.c b/src/networking.c
+index 77b9a6fcf..f8eccec9d 100644
+--- a/src/networking.c
++++ b/src/networking.c
+@@ -86,7 +86,7 @@ void linkClient(client *c) {
+ }
+ 
+ client *createClient(connection *conn) {
+-    client *c = zmalloc(sizeof(client));
++    client *c = zmalloc_dram(sizeof(client));
+ 
+     /* passing NULL as conn it is possible to create a non connected client.
+      * This is useful since all the commands needs to be executed
+@@ -109,8 +109,8 @@ client *createClient(connection *conn) {
+     c->name = NULL;
+     c->bufpos = 0;
+     c->qb_pos = 0;
+-    c->querybuf = sdsempty();
+-    c->pending_querybuf = sdsempty();
++    c->querybuf = sdsdramempty();
++    c->pending_querybuf = sdsdramempty();
+     c->querybuf_peak = 0;
+     c->reqtype = 0;
+     c->argc = 0;
+@@ -135,7 +135,7 @@ client *createClient(connection *conn) {
+     c->slave_listening_port = 0;
+     c->slave_ip[0] = '\0';
+     c->slave_capa = SLAVE_CAPA_NONE;
+-    c->reply = listCreate();
++    c->reply = listCreateDRAM();
+     c->reply_bytes = 0;
+     c->obuf_soft_limit_reached_time = 0;
+     listSetFreeMethod(c->reply,freeClientReplyValue);
+@@ -150,9 +150,9 @@ client *createClient(connection *conn) {
+     c->bpop.numreplicas = 0;
+     c->bpop.reploffset = 0;
+     c->woff = 0;
+-    c->watched_keys = listCreate();
++    c->watched_keys = listCreateDRAM();
+     c->pubsub_channels = dictCreate(&objectKeyPointerValueDictType,NULL);
+-    c->pubsub_patterns = listCreate();
++    c->pubsub_patterns = listCreateDRAM();
+     c->peerid = NULL;
+     c->client_list_node = NULL;
+     c->client_tracking_redirection = 0;
+@@ -191,7 +191,7 @@ void clientInstallWriteHandler(client *c) {
+          * a system call. We'll only really install the write handler if
+          * we'll not be able to write the whole reply at once. */
+         c->flags |= CLIENT_PENDING_WRITE;
+-        listAddNodeHead(server.clients_pending_write,c);
++        listAddNodeHeadDRAM(server.clients_pending_write,c);
+     }
+ }
+ 
+@@ -1006,7 +1006,7 @@ void acceptUnixHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
+ static void freeClientArgv(client *c) {
+     int j;
+     for (j = 0; j < c->argc; j++)
+-        decrRefCount(c->argv[j]);
++        decrRefCountDRAM(c->argv[j]);
+     c->argc = 0;
+     c->cmd = NULL;
+ }
+@@ -1067,7 +1067,7 @@ void unlinkClient(client *c) {
+     if (c->flags & CLIENT_PENDING_WRITE) {
+         ln = listSearchKey(server.clients_pending_write,c);
+         serverAssert(ln != NULL);
+-        listDelNode(server.clients_pending_write,ln);
++        listDelNodeDRAM(server.clients_pending_write,ln);
+         c->flags &= ~CLIENT_PENDING_WRITE;
+     }
+ 
+@@ -1153,16 +1153,16 @@ void freeClient(client *c) {
+ 
+     /* UNWATCH all the keys */
+     unwatchAllKeys(c);
+-    listRelease(c->watched_keys);
++    listReleaseDRAM(c->watched_keys);
+ 
+     /* Unsubscribe from all the pubsub channels */
+     pubsubUnsubscribeAllChannels(c,0);
+     pubsubUnsubscribeAllPatterns(c,0);
+     dictRelease(c->pubsub_channels);
+-    listRelease(c->pubsub_patterns);
++    listReleaseDRAM(c->pubsub_patterns);
+ 
+     /* Free data structures. */
+-    listRelease(c->reply);
++    listReleaseDRAM(c->reply);
+     freeClientArgv(c);
+ 
+     /* Unlink the client: this will close the socket, remove the I/O
+@@ -1206,10 +1206,10 @@ void freeClient(client *c) {
+     /* Release other dynamically allocated client structure fields,
+      * and finally release the client structure itself. */
+     if (c->name) decrRefCount(c->name);
+-    zfree(c->argv);
++    zfree_dram(c->argv);
+     freeClientMultiState(c);
+     sdsfree(c->peerid);
+-    zfree(c);
++    zfree_dram(c);
+ }
+ 
+ /* Schedule a client to free it at a safe time in the serverCron() function.
+@@ -1388,7 +1388,7 @@ int handleClientsWithPendingWrites(void) {
+     while((ln = listNext(&li))) {
+         client *c = listNodeValue(ln);
+         c->flags &= ~CLIENT_PENDING_WRITE;
+-        listDelNode(server.clients_pending_write,ln);
++        listDelNodeDRAM(server.clients_pending_write,ln);
+ 
+         /* If a client is protected, don't do anything,
+          * that may trigger write error or recreate handler. */
+@@ -1541,8 +1541,8 @@ int processInlineBuffer(client *c) {
+ 
+     /* Setup argv array on client structure */
+     if (argc) {
+-        if (c->argv) zfree(c->argv);
+-        c->argv = zmalloc(sizeof(robj*)*argc);
++        if (c->argv) zfree_dram(c->argv);
++        c->argv = zmalloc_dram(sizeof(robj*)*argc);
+     }
+ 
+     /* Create redis objects for all arguments. */
+@@ -1638,8 +1638,8 @@ int processMultibulkBuffer(client *c) {
+         c->multibulklen = ll;
+ 
+         /* Setup argv array on client structure */
+-        if (c->argv) zfree(c->argv);
+-        c->argv = zmalloc(sizeof(robj*)*c->multibulklen);
++        if (c->argv) zfree_dram(c->argv);
++        c->argv = zmalloc_dram(sizeof(robj*)*c->multibulklen);
+     }
+ 
+     serverAssertWithInfo(c,NULL,c->multibulklen > 0);
+@@ -2587,7 +2587,7 @@ void rewriteClientCommandVector(client *c, int argc, ...) {
+      * sure that if the same objects are reused in the new vector the
+      * refcount gets incremented before it gets decremented. */
+     for (j = 0; j < c->argc; j++) decrRefCount(c->argv[j]);
+-    zfree(c->argv);
++    zfree_dram(c->argv);
+     /* Replace argv and argc with our new versions. */
+     c->argv = argv;
+     c->argc = argc;
+@@ -2599,7 +2599,7 @@ void rewriteClientCommandVector(client *c, int argc, ...) {
+ /* Completely replace the client command vector with the provided one. */
+ void replaceClientCommandVector(client *c, int argc, robj **argv) {
+     freeClientArgv(c);
+-    zfree(c->argv);
++    zfree_dram(c->argv);
+     c->argv = argv;
+     c->argc = argc;
+     c->cmd = lookupCommandOrOriginal(c->argv[0]->ptr);
+@@ -2621,7 +2621,7 @@ void rewriteClientCommandArgument(client *c, int i, robj *newval) {
+     robj *oldval;
+ 
+     if (i >= c->argc) {
+-        c->argv = zrealloc(c->argv,sizeof(robj*)*(i+1));
++        c->argv = zrealloc_dram(c->argv,sizeof(robj*)*(i+1));
+         c->argc = i+1;
+         c->argv[i] = NULL;
+     }
+@@ -3088,7 +3088,7 @@ int handleClientsWithPendingWritesUsingThreads(void) {
+             freeClientAsync(c);
+         }
+     }
+-    listEmpty(server.clients_pending_write);
++    listEmptyDRAM(server.clients_pending_write);
+     return processed;
+ }
+ 
+diff --git a/src/object.c b/src/object.c
+index 1bc400e85..a2b1ed6df 100644
+--- a/src/object.c
++++ b/src/object.c
+@@ -36,10 +36,13 @@
+ #define strtold(a,b) ((long double)strtod((a),(b)))
+ #endif
+ 
++#define OBJ_MEMORY_GENERAL  0
++#define OBJ_MEMORY_DRAM     1
++
+ /* ===================== Creation and parsing of objects ==================== */
+ 
+ robj *createObject(int type, void *ptr) {
+-    robj *o = zmalloc(sizeof(*o));
++    robj *o = zmalloc_dram(sizeof(*o));
+     o->type = type;
+     o->encoding = OBJ_ENCODING_RAW;
+     o->ptr = ptr;
+@@ -358,7 +361,7 @@ void incrRefCount(robj *o) {
+     }
+ }
+ 
+-void decrRefCount(robj *o) {
++static void _decrRefCount(robj *o, int on_dram) {
+     if (o->refcount == 1) {
+         switch(o->type) {
+         case OBJ_STRING: freeStringObject(o); break;
+@@ -370,13 +373,25 @@ void decrRefCount(robj *o) {
+         case OBJ_STREAM: freeStreamObject(o); break;
+         default: serverPanic("Unknown object type"); break;
+         }
+-        zfree(o);
++        if (on_dram == OBJ_MEMORY_GENERAL || o->encoding == OBJ_ENCODING_EMBSTR) {
++            zfree(o);
++        } else {
++            zfree_dram(o);
++        }
+     } else {
+         if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
+         if (o->refcount != OBJ_SHARED_REFCOUNT) o->refcount--;
+     }
+ }
+ 
++void decrRefCount(robj *o) {
++    _decrRefCount(o, OBJ_MEMORY_GENERAL);
++}
++
++void decrRefCountDRAM(robj *o) {
++    _decrRefCount(o, OBJ_MEMORY_DRAM);
++}
++
+ /* This variant of decrRefCount() gets its argument as void, and is useful
+  * as free method in data structures that expect a 'void free_object(void*)'
+  * prototype for the free method. */
+diff --git a/src/sds.c b/src/sds.c
+index 118971621..df0d630f4 100644
+--- a/src/sds.c
++++ b/src/sds.c
+@@ -41,6 +41,9 @@
+ 
+ const char *SDS_NOINIT = "SDS_NOINIT";
+ 
++#define SDS_GENERAL_VARIANT  0
++#define SDS_DRAM_VARIANT     1
++
+ static inline int sdsHdrSize(char type) {
+     switch(type&SDS_TYPE_MASK) {
+         case SDS_TYPE_5:
+@@ -86,7 +89,7 @@ static inline char sdsReqType(size_t string_size) {
+  * You can print the string with printf() as there is an implicit \0 at the
+  * end of the string. However the string is binary safe and can contain
+  * \0 characters in the middle, as the length is stored in the sds header. */
+-sds sdsnewlen(const void *init, size_t initlen) {
++static sds _sdsnewlen(const void *init, size_t initlen, int on_dram) {
+     void *sh;
+     sds s;
+     char type = sdsReqType(initlen);
+@@ -96,7 +99,8 @@ sds sdsnewlen(const void *init, size_t initlen) {
+     int hdrlen = sdsHdrSize(type);
+     unsigned char *fp; /* flags pointer. */
+ 
+-    sh = s_malloc(hdrlen+initlen+1);
++    sh = (on_dram == SDS_DRAM_VARIANT) ? s_dram_malloc(hdrlen+initlen+1)
++                                       : s_malloc(hdrlen+initlen+1);
+     if (sh == NULL) return NULL;
+     if (init==SDS_NOINIT)
+         init = NULL;
+@@ -144,12 +148,26 @@ sds sdsnewlen(const void *init, size_t initlen) {
+     return s;
+ }
+ 
++sds sdsnewlen(const void *init, size_t initlen) {
++    return _sdsnewlen(init, initlen, SDS_GENERAL_VARIANT);
++}
++
++static sds sdsdramnewlen(const void *init, size_t initlen) {
++    return _sdsnewlen(init, initlen, SDS_DRAM_VARIANT);
++}
++
+ /* Create an empty (zero length) sds string. Even in this case the string
+  * always has an implicit null term. */
+ sds sdsempty(void) {
+     return sdsnewlen("",0);
+ }
+ 
++/* Create an empty (zero length) sds string on DRAM. Even in this case the string
++ * always has an implicit null term. */
++sds sdsdramempty(void) {
++    return sdsdramnewlen("",0);
++}
++
+ /* Create a new sds string starting from a null terminated C string. */
+ sds sdsnew(const char *init) {
+     size_t initlen = (init == NULL) ? 0 : strlen(init);
+diff --git a/src/sds.h b/src/sds.h
+index adcc12c0a..5bdeedad7 100644
+--- a/src/sds.h
++++ b/src/sds.h
+@@ -218,6 +218,7 @@ static inline void sdssetalloc(sds s, size_t newlen) {
+ sds sdsnewlen(const void *init, size_t initlen);
+ sds sdsnew(const char *init);
+ sds sdsempty(void);
++sds sdsdramempty(void);
+ sds sdsdup(const sds s);
+ void sdsfree(sds s);
+ sds sdsgrowzero(sds s, size_t len);
+diff --git a/src/sdsalloc.h b/src/sdsalloc.h
+index c04ff2a0a..7c7a6a80f 100644
+--- a/src/sdsalloc.h
++++ b/src/sdsalloc.h
+@@ -43,5 +43,6 @@
+ #define s_malloc zmalloc
+ #define s_realloc zrealloc
+ #define s_free zfree
++#define s_dram_malloc zmalloc_dram
+ 
+ #endif
+diff --git a/src/server.h b/src/server.h
+index f6ab8fe34..4a6559902 100644
+--- a/src/server.h
++++ b/src/server.h
+@@ -1749,6 +1749,7 @@ void execCommandPropagateExec(client *c);
+ 
+ /* Redis object implementation */
+ void decrRefCount(robj *o);
++void decrRefCountDRAM(robj *o);
+ void decrRefCountVoid(void *o);
+ void incrRefCount(robj *o);
+ robj *makeObjectShared(robj *o);
+-- 
+2.19.1.6.gb485710b
+

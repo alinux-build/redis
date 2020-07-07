@@ -11,6 +11,9 @@
 # Tests fail in mock, not in local build.
 %global with_tests %{?_with_tests:1}%{!?_with_tests:0}
 
+# PMEM feature backported from memKeyDB
+%global use_pmem    1
+
 # Commit IDs for the (unversioned) redis-doc repository
 # https://fedoraproject.org/wiki/Packaging:SourceURL "Commit Revision"
 %global doc_commit f092dd3227cc74978853e379c0a7731bdaa324af
@@ -23,7 +26,7 @@ Name:              redis
 Version:           6.0.5
 Release:           1.%{alicloud_base_release}%{?dist}
 Summary:           A persistent key-value database
-# redis, linenoise, lzf, hiredis are BSD
+# redis, linenoise, lzf, hiredis, memkind are BSD
 # lua is MIT
 License:           BSD and MIT
 URL:               https://redis.io
@@ -38,6 +41,12 @@ Source7:           %{name}-limit-systemd
 Source8:           %{name}-limit-init
 Source9:           macros.%{name}
 Source10:          https://github.com/antirez/%{name}-doc/archive/%{doc_commit}/%{name}-doc-%{short_doc_commit}.tar.gz
+%if 0%{?use_pmem}
+# We use memkind as default allocator in PMEM feature, which is built
+# with special configurations. So we link memkind source as redis
+# build deps
+Source11:          memkind-1.10.1-rc2.tar.gz
+%endif
 
 # To refresh patches:
 # tar xf redis-xxx.tar.gz && cd redis-xxx && git init && git add . && git commit -m "%%{version} baseline"
@@ -51,7 +60,34 @@ Patch0001:         0001-1st-man-pageis-for-redis-cli-redis-benchmark-redis-c.pat
 Patch0002:         0002-install-redis-check-rdb-as-a-symlink-instead-of-dupl.patch
 # https://github.com/antirez/redis/pull/7168 - notify systemd
 Patch0003:         0003-Notify-systemd-on-sentinel-startup.patch
+
+%if 0%{?use_pmem}
+# Patches backported from memKeyDB, to enable PMEM feature
+Patch1001:	1001-Merge-pull-request-1-from-kasiawasiuta-README-modifi.patch
+Patch1002:	1002-Update-CONTRIBUTING.patch
+Patch1003:	1003-Rules-for-merging-PRs.patch
+Patch1004:	1004-Merge-pull-request-1-from-kasiawasiuta-README-modifi.patch
+Patch1005:	1005-Extend-redis-configuration-options.patch
+Patch1009:	1009-Add-basic-support-to-memkind-allocator.patch
+Patch1010:	1010-Add-memkind-defrag-implementation.patch
+Patch1011:	1011-Use-memkind-allocator-as-default.patch
+Patch1012:	1012-Add-PMEM-mechanism-to-zmalloc-module.patch
+Patch1013:	1013-Update-INFO-command.patch
+Patch1014:	1014-Add-PMEM-config-test.patch
+Patch1015:	1015-Extend-configuration-parameters.patch
+Patch1019:	1019-Move-often-used-structures-explicitly-to-DRAM.patch
+Patch1020:	1020-Provide-information-about-memkind.patch
+Patch1021:	1021-Add-PMEM-dynamic-threshold-mechanism.patch
+Patch1022:	1022-Enable-memkind_defrag_reallocate-to-work-on-all-allo.patch
+Patch1023:	1023-Add-hashtable-on-dram-option.patch
+Patch1024:  1024-add-memkind-as-build-deps.patch
+%endif
+
+%if 0%{?alinux} < 3
+BuildRequires:     devtoolset-6-gcc devtoolset-6-libatomic-devel
+%else
 BuildRequires:     gcc
+%endif
 %if 0%{?with_tests}
 BuildRequires:     procps-ng
 BuildRequires:     tcl
@@ -59,6 +95,14 @@ BuildRequires:     tcl
 BuildRequires:     pkgconfig(libsystemd)
 BuildRequires:     systemd-devel
 BuildRequires:     openssl-devel
+
+%if 0%{?use_pmem}
+# Required by memkind
+BuildRequires:     autoconf automake libtool
+BuildRequires:     daxctl-devel > 65
+BuildRequires:     numactl-devel
+%endif
+
 # redis-trib functionality migrated to redis-cli
 Obsoletes:         redis-trib < 5
 # Required for redis-shutdown
@@ -69,7 +113,11 @@ Requires(post):    systemd
 Requires(preun):   systemd
 Requires(postun):  systemd
 Provides:          bundled(hiredis)
+%if 0%{?use_pmem}
+Provides:          bundled(memkind)
+%else
 Provides:          bundled(jemalloc)
+%endif
 Provides:          bundled(lua-libs)
 Provides:          bundled(linenoise)
 Provides:          bundled(lzf)
@@ -79,26 +127,26 @@ Provides:          bundled(lzf)
 Provides:          redis(modules_abi)%{?_isa} = %{redis_modules_abi}
 
 %description
-Redis is an advanced key-value store. It is often referred to as a data 
-structure server since keys can contain strings, hashes, lists, sets and 
+Redis is an advanced key-value store. It is often referred to as a data
+structure server since keys can contain strings, hashes, lists, sets and
 sorted sets.
 
 You can run atomic operations on these types, like appending to a string;
-incrementing the value in a hash; pushing to a list; computing set 
-intersection, union and difference; or getting the member with highest 
+incrementing the value in a hash; pushing to a list; computing set
+intersection, union and difference; or getting the member with highest
 ranking in a sorted set.
 
-In order to achieve its outstanding performance, Redis works with an 
-in-memory dataset. Depending on your use case, you can persist it either 
-by dumping the dataset to disk every once in a while, or by appending 
+In order to achieve its outstanding performance, Redis works with an
+in-memory dataset. Depending on your use case, you can persist it either
+by dumping the dataset to disk every once in a while, or by appending
 each command to a log.
 
-Redis also supports trivial-to-setup master-slave replication, with very 
-fast non-blocking first synchronization, auto-reconnection on net split 
+Redis also supports trivial-to-setup master-slave replication, with very
+fast non-blocking first synchronization, auto-reconnection on net split
 and so forth.
 
-Other features include Transactions, Pub/Sub, Lua scripting, Keys with a 
-limited time-to-live, and configuration settings to make Redis behave like 
+Other features include Transactions, Pub/Sub, Lua scripting, Keys with a
+limited time-to-live, and configuration settings to make Redis behave like
 a cache.
 
 You can use Redis from most programming languages also.
@@ -126,11 +174,38 @@ administration and development.
 
 %prep
 %setup -q -b 10
+%if 0%{?use_pmem}
+%setup -q -b 11
+%endif
 %setup -q
 mv ../%{name}-doc-%{doc_commit} doc
+%if 0%{?use_pmem}
+mv ../memkind-1.10.1-rc2 deps/memkind
+%endif
 %patch0001 -p1
 %patch0002 -p1
 %patch0003 -p1
+
+%if 0%{?use_pmem}
+%patch1001 -p1
+%patch1002 -p1
+%patch1003 -p1
+%patch1004 -p1
+%patch1005 -p1
+%patch1009 -p1
+%patch1010 -p1
+%patch1011 -p1
+%patch1012 -p1
+%patch1013 -p1
+%patch1014 -p1
+%patch1015 -p1
+%patch1019 -p1
+%patch1020 -p1
+%patch1021 -p1
+%patch1022 -p1
+%patch1023 -p1
+%patch1024 -p1
+%endif
 
 mv deps/lua/COPYRIGHT    COPYRIGHT-lua
 mv deps/hiredis/COPYING  COPYING-hiredis
@@ -151,6 +226,7 @@ fi
 %global make_flags	DEBUG="" V="echo" LDFLAGS="%{?__global_ldflags}" CFLAGS+="%{optflags} -fPIC" INSTALL="install -p" PREFIX=%{buildroot}%{_prefix} BUILD_WITH_SYSTEMD=yes BUILD_TLS=yes
 
 %build
+source /opt/rh/devtoolset-6/enable
 make %{?_smp_mflags} %{make_flags} all
 
 %install
@@ -280,6 +356,7 @@ exit 0
 %changelog
 * Tue Jul 07 2020 Caspar Zhang <caspar@linux.alibaba.com> - 6.0.5-1.1
 - Rebuild for Alibaba Cloud Linux
+- Backport patches from memKeyDB to enable PMEM feature
 
 * Wed Jun 10 2020 Nathan Scott <nathans@redhat.com> - 6.0.5-1
 - Upstream 6.0.5 release.

@@ -1,0 +1,71 @@
+From 29e98d5465fd59bdbf061aeae407a0de87a69ec5 Mon Sep 17 00:00:00 2001
+From: michalbiesek <michal.biesek@intel.com>
+Date: Mon, 20 Apr 2020 12:54:41 +0200
+Subject: [PATCH 14/23] Add PMEM config test
+
+Check correct setup of PMEM configuration
+To run test, call:
+- make CFLAGS=-DREDIS_TEST
+- ./redis-server test pmem
+---
+ src/server.c  |  2 ++
+ src/zmalloc.c | 19 +++++++++++++++++++
+ src/zmalloc.h |  1 +
+ 3 files changed, 22 insertions(+)
+
+diff --git a/src/server.c b/src/server.c
+index 7cc62a8c4..f03660a3f 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -4999,6 +4999,8 @@ int main(int argc, char **argv) {
+             return crc64Test(argc, argv);
+         } else if (!strcasecmp(argv[2], "zmalloc")) {
+             return zmalloc_test(argc, argv);
++        } else if (!strcasecmp(argv[2], "pmem")) {
++            return zmalloc_pmem_test(argc, argv);
+         }
+ 
+         return -1; /* test not found */
+diff --git a/src/zmalloc.c b/src/zmalloc.c
+index eb6a5e694..e57586532 100644
+--- a/src/zmalloc.c
++++ b/src/zmalloc.c
+@@ -749,4 +749,23 @@ int zmalloc_test(int argc, char **argv) {
+     printf("Freed pointer; used: %zu\n", zmalloc_used_memory());
+     return 0;
+ }
++
++int zmalloc_pmem_test(int argc, char **argv) {
++    void *ptr;
++
++    UNUSED(argc);
++    UNUSED(argv);
++    printf("Initial used PMEM memory: %zu\n", zmalloc_used_pmem_memory());
++    ptr = zmalloc_pmem(123);
++    if (!ptr) {
++       printf("ERROR! can't allocate Persistent Memory\n");
++       return 1;
++    }
++    printf("Allocated 123 bytes; used PMEM memory: %zu\n", zmalloc_used_pmem_memory());
++    ptr = zrealloc(ptr, 456);
++    printf("Reallocated to 456 bytes; used PMEM memory: %zu\n", zmalloc_used_pmem_memory());
++    zfree(ptr);
++    printf("Freed pointer; used PMEM memory: %zu\n", zmalloc_used_pmem_memory());
++    return 0;
++}
+ #endif
+diff --git a/src/zmalloc.h b/src/zmalloc.h
+index b673997e7..4b8628399 100644
+--- a/src/zmalloc.h
++++ b/src/zmalloc.h
+@@ -123,6 +123,7 @@ size_t zmalloc_usable(void *ptr);
+ 
+ #ifdef REDIS_TEST
+ int zmalloc_test(int argc, char **argv);
++int zmalloc_pmem_test(int argc, char **argv);
+ #endif
+ 
+ #endif /* __ZMALLOC_H */
+-- 
+2.19.1.6.gb485710b
+

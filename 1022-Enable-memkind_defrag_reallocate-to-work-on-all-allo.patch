@@ -1,0 +1,27 @@
+From 670a19fd32e976c9ea26965a060940615635f73c Mon Sep 17 00:00:00 2001
+From: michalbiesek <michal.biesek@intel.com>
+Date: Mon, 8 Jun 2020 11:26:08 +0200
+Subject: [PATCH 22/23] Enable memkind_defrag_reallocate to work on all
+ allocations
+
+- passing NULL allows to run defrag_reallocate on DRAM and PMEM
+---
+ src/defrag.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/defrag.c b/src/defrag.c
+index fe5bcedba..d8e5cfa83 100644
+--- a/src/defrag.c
++++ b/src/defrag.c
+@@ -71,7 +71,7 @@ void* activeDefragAlloc(void *ptr) {
+ 
+ #ifdef HAVE_DEFRAG_MEMKIND
+ void* activeDefragAlloc(void *ptr) {
+-    void* newptr = memkind_defrag_reallocate(MEMKIND_DEFAULT, ptr);
++    void* newptr = memkind_defrag_reallocate(NULL, ptr);
+     if (!newptr) server.stat_active_defrag_misses++;
+     return newptr;
+ }
+-- 
+2.19.1.6.gb485710b
+
