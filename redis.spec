@@ -1,3 +1,4 @@
+%define alicloud_base_release 1
 #
 # Fedora spec file for redis
 #
@@ -20,7 +21,7 @@
 
 Name:              redis
 Version:           6.0.5
-Release:           1%{?dist}
+Release:           1.%{alicloud_base_release}%{?dist}
 Summary:           A persistent key-value database
 # redis, linenoise, lzf, hiredis are BSD
 # lua is MIT
@@ -277,6 +278,9 @@ exit 0
 
 
 %changelog
+* Tue Jul 07 2020 Caspar Zhang <caspar@linux.alibaba.com> - 6.0.5-1.1
+- Rebuild for Alibaba Cloud Linux
+
 * Wed Jun 10 2020 Nathan Scott <nathans@redhat.com> - 6.0.5-1
 - Upstream 6.0.5 release.
 
