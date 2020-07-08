@@ -1,4 +1,4 @@
-%define alicloud_base_release 1
+%define alicloud_base_release 2
 #
 # Fedora spec file for redis
 #
@@ -63,24 +63,21 @@ Patch0003:         0003-Notify-systemd-on-sentinel-startup.patch
 
 %if 0%{?use_pmem}
 # Patches backported from memKeyDB, to enable PMEM feature
-Patch1001:	1001-Merge-pull-request-1-from-kasiawasiuta-README-modifi.patch
-Patch1002:	1002-Update-CONTRIBUTING.patch
-Patch1003:	1003-Rules-for-merging-PRs.patch
-Patch1004:	1004-Merge-pull-request-1-from-kasiawasiuta-README-modifi.patch
-Patch1005:	1005-Extend-redis-configuration-options.patch
-Patch1009:	1009-Add-basic-support-to-memkind-allocator.patch
-Patch1010:	1010-Add-memkind-defrag-implementation.patch
-Patch1011:	1011-Use-memkind-allocator-as-default.patch
-Patch1012:	1012-Add-PMEM-mechanism-to-zmalloc-module.patch
-Patch1013:	1013-Update-INFO-command.patch
-Patch1014:	1014-Add-PMEM-config-test.patch
-Patch1015:	1015-Extend-configuration-parameters.patch
-Patch1019:	1019-Move-often-used-structures-explicitly-to-DRAM.patch
-Patch1020:	1020-Provide-information-about-memkind.patch
-Patch1021:	1021-Add-PMEM-dynamic-threshold-mechanism.patch
-Patch1022:	1022-Enable-memkind_defrag_reallocate-to-work-on-all-allo.patch
-Patch1023:	1023-Add-hashtable-on-dram-option.patch
-Patch1024:  1024-add-memkind-as-build-deps.patch
+Patch1001:         1001-docs-update-CONTRIBUTING-and-README.md.patch
+Patch1002:         1002-Extend-redis-configuration-options.patch
+Patch1003:         1003-Add-basic-support-to-memkind-allocator.patch
+Patch1004:         1004-Add-memkind-defrag-implementation.patch
+Patch1005:         1005-Use-memkind-allocator-as-default.patch
+Patch1006:         1006-Add-PMEM-mechanism-to-zmalloc-module.patch
+Patch1007:         1007-Update-INFO-command.patch
+Patch1008:         1008-Add-PMEM-config-test.patch
+Patch1009:         1009-Extend-configuration-parameters.patch
+Patch1011:         1011-Move-often-used-structures-explicitly-to-DRAM.patch
+Patch1012:         1012-Provide-information-about-memkind.patch
+Patch1013:         1013-Add-PMEM-dynamic-threshold-mechanism.patch
+Patch1014:         1014-Enable-memkind_defrag_reallocate-to-work-on-all-allo.patch
+Patch1015:         1015-Add-hashtable-on-dram-option.patch
+Patch1016:         1016-add-memkind-as-build-deps.patch
 %endif
 
 %if 0%{?alinux} < 3
@@ -192,19 +189,16 @@ mv ../memkind-1.10.1-rc2 deps/memkind
 %patch1003 -p1
 %patch1004 -p1
 %patch1005 -p1
+%patch1006 -p1
+%patch1007 -p1
+%patch1008 -p1
 %patch1009 -p1
-%patch1010 -p1
 %patch1011 -p1
 %patch1012 -p1
 %patch1013 -p1
 %patch1014 -p1
 %patch1015 -p1
-%patch1019 -p1
-%patch1020 -p1
-%patch1021 -p1
-%patch1022 -p1
-%patch1023 -p1
-%patch1024 -p1
+%patch1016 -p1
 %endif
 
 mv deps/lua/COPYRIGHT    COPYRIGHT-lua
@@ -354,9 +348,11 @@ exit 0
 
 
 %changelog
+* Thu Jul 09 2020 Caspar Zhang <caspar@linux.alibaba.com> - 6.0.5-1.2
+- Backport patches from memKeyDB to enable PMEM feature
+
 * Tue Jul 07 2020 Caspar Zhang <caspar@linux.alibaba.com> - 6.0.5-1.1
 - Rebuild for Alibaba Cloud Linux
-- Backport patches from memKeyDB to enable PMEM feature
 
 * Wed Jun 10 2020 Nathan Scott <nathans@redhat.com> - 6.0.5-1
 - Upstream 6.0.5 release.

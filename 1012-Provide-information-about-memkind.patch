@@ -1,7 +1,7 @@
-From 36a7e635cadc2211903bb3f7e4c6883cbe29070a Mon Sep 17 00:00:00 2001
+From 9f04b6552310a738d6d4ee11d45edaea5b816af5 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Tue, 19 May 2020 20:47:33 +0200
-Subject: [PATCH 20/23] Provide information about memkind
+Subject: [PATCH 12/16] Provide information about memkind
 
 - which version should be used
 - which configure options should be set

@@ -1,7 +1,7 @@
-From 9ae3ec7bd13ac4235855cae68a55b5826fce13ea Mon Sep 17 00:00:00 2001
+From 1086a60bb98afcac93fc2aaa895c7e8af5606001 Mon Sep 17 00:00:00 2001
 From: Caspar Zhang <caspar@linux.alibaba.com>
 Date: Tue, 7 Jul 2020 23:17:00 +0800
-Subject: [PATCH] add memkind as build deps
+Subject: [PATCH 16/16] add memkind as build deps
 
 Signed-off-by: Caspar Zhang <caspar@linux.alibaba.com>
 ---
@@ -33,7 +33,7 @@ index 700867f3b..50f01a7e3 100644
 +
 +.PHONY: memkind
 diff --git a/src/Makefile b/src/Makefile
-index c67f65103..4eb46f981 100644
+index 9ce1573c8..5ab38f012 100644
 --- a/src/Makefile
 +++ b/src/Makefile
 @@ -195,8 +195,9 @@ ifeq ($(BUILD_TLS),yes)
@@ -41,10 +41,10 @@ index c67f65103..4eb46f981 100644
  
  ifeq ($(MALLOC),memkind)
 -	FINAL_CFLAGS+= -DUSE_MEMKIND
--	FINAL_LIBS+= -lmemkind -ldaxctl
+-	FINAL_LIBS+= -lmemkind -ldaxctl -lnuma
 +	DEPENDENCY_TARGETS+= memkind
 +	FINAL_CFLAGS+= -DUSE_MEMKIND -I../deps/memkind/include
-+	FINAL_LIBS+= ../deps/memkind/.libs/libmemkind.a -ldaxctl -lnuma -ldl
++	FINAL_LIBS+= ../deps/memkind/.libs/libmemkind.a -ldaxctl -lnuma
  endif
  
  REDIS_CC=$(QUIET_CC)$(CC) $(FINAL_CFLAGS)

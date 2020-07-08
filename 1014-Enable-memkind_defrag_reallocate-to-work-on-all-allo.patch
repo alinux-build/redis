@@ -1,7 +1,7 @@
-From 670a19fd32e976c9ea26965a060940615635f73c Mon Sep 17 00:00:00 2001
+From ebeab881e3bdbff1fd81d41bb0c24871dec78e76 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Mon, 8 Jun 2020 11:26:08 +0200
-Subject: [PATCH 22/23] Enable memkind_defrag_reallocate to work on all
+Subject: [PATCH 14/16] Enable memkind_defrag_reallocate to work on all
  allocations
 
 - passing NULL allows to run defrag_reallocate on DRAM and PMEM

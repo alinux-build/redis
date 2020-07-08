@@ -1,11 +1,13 @@
-From 7b9243038ee550833163ad2b7cecc286cd662e63 Mon Sep 17 00:00:00 2001
+From 4e9999d85bfc2e405d5e9bceea3c39ca6f3a0224 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Thu, 9 Apr 2020 11:50:46 +0200
-Subject: [PATCH 09/23] Add basic support to memkind allocator
+Subject: [PATCH 03/16] Add basic support to memkind allocator
 
 - compile against libmemkind: make MALLOC=memkind
 
 Co-authored-by: jschmieg <jakub.schmiegel@intel.com>
+[ caspar: add -lnuma in FINAL_LIBS if using memkind as default allocator. ]
+Signed-off-by: Caspar Zhang <caspar@linux.alibaba.com>
 ---
  README.md     |  4 ++++
  src/Makefile  |  9 +++++++++
@@ -29,7 +31,7 @@ index c4519a7f3..9aaa229c2 100644
  -------------
  
 diff --git a/src/Makefile b/src/Makefile
-index 535701b18..8fd79172a 100644
+index 535701b18..fe84dce48 100644
 --- a/src/Makefile
 +++ b/src/Makefile
 @@ -70,6 +70,10 @@ ifeq ($(USE_JEMALLOC),no)
@@ -49,7 +51,7 @@ index 535701b18..8fd79172a 100644
  
 +ifeq ($(MALLOC),memkind)
 +	FINAL_CFLAGS+= -DUSE_MEMKIND
-+	FINAL_LIBS+= -lmemkind -ldaxctl
++	FINAL_LIBS+= -lmemkind -ldaxctl -lnuma
 +endif
 +
  REDIS_CC=$(QUIET_CC)$(CC) $(FINAL_CFLAGS)

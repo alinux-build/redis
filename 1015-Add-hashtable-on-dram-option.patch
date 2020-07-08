@@ -1,7 +1,7 @@
-From 505aafb9c80f4d9d457a8e5de64c12c7d9782fb6 Mon Sep 17 00:00:00 2001
+From 0b382470effb3c71e99a993f526c9b5dfb5050d0 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Fri, 29 May 2020 11:18:58 +0200
-Subject: [PATCH 23/23] Add hashtable-on-dram option
+Subject: [PATCH 15/16] Add hashtable-on-dram option
 
 - set to no to keep expected dram-pmem ratio for small object size e.g.
 32 bytes for 1:16 ratio
@@ -21,7 +21,7 @@ Co-authored-by: jschmieg <jakub.schmiegel@intel.com>
  7 files changed, 16 insertions(+), 3 deletions(-)
 
 diff --git a/redis.conf b/redis.conf
-index e083dee8d..b488d00f6 100644
+index 4e85010a3..a853cf67e 100644
 --- a/redis.conf
 +++ b/redis.conf
 @@ -1882,3 +1882,6 @@ dynamic-threshold-max 10000

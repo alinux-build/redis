@@ -1,7 +1,7 @@
-From 82f195aa703c0641f2ecd1ca9482947ecd39e615 Mon Sep 17 00:00:00 2001
+From 28b15732d563d82ea26fbb1d5629cd4e8a314c57 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Mon, 17 Feb 2020 15:33:37 +0100
-Subject: [PATCH 05/23] Extend redis configuration options:
+Subject: [PATCH 02/16] Extend redis configuration options:
 
 - memory-alloc-policy is used to described how/if Persistent Memory is
 used
@@ -30,7 +30,7 @@ ratio
  create mode 100644 src/pmem.c
 
 diff --git a/redis.conf b/redis.conf
-index 1aa760599..1e3e739db 100644
+index 1aa760599..c24694293 100644
 --- a/redis.conf
 +++ b/redis.conf
 @@ -142,7 +142,7 @@ tcp-keepalive 300
@@ -80,7 +80,7 @@ index 1aa760599..1e3e739db 100644
  #
  # Set bgsave child process to cpu affinity 1,10,11
  # bgsave_cpulist 1,10-11
-+#
++
 +############################### MEMORY ALLOCATION CONFIGURATION #############################
 +#
 +# Memory Allocation Policies allow modifying mechanism how heap memory is allocated via zmalloc()

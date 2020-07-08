@@ -1,7 +1,7 @@
-From c03d2a167e7f0fe63eaaed713a9c78360c5b04b9 Mon Sep 17 00:00:00 2001
+From 2b2ea204c699d7578e094e1e963ac3b7a1ee79d7 Mon Sep 17 00:00:00 2001
 From: jschmieg <jakub.schmiegel@intel.com>
 Date: Tue, 19 May 2020 21:18:38 +0200
-Subject: [PATCH 19/23] Move often used structures explicitly to DRAM
+Subject: [PATCH 11/16] Move often used structures explicitly to DRAM
 
 - structures like e.g. client buffers, iterators should stay
 on DRAM, while they are often allocated and freed

@@ -1,17 +1,38 @@
-From f21ead607d4fbc7bb33ffcce0df3c05d589539ab Mon Sep 17 00:00:00 2001
+From 4da43e5eaa7d86091f76bae72fc3730ce5414abc Mon Sep 17 00:00:00 2001
 From: kasiawasiuta <kasiawasiuta@users.noreply.github.com>
 Date: Tue, 10 Mar 2020 11:40:42 +0100
-Subject: [PATCH 01/23] Merge pull request #1 from
- kasiawasiuta/README-modification
+Subject: [PATCH 01/16] docs: update CONTRIBUTING and README.md
+
+This is a combination of 4 commits from memKeyDB tree:
+
+This is the 1st commit message:
+
+Merge pull request #1 from kasiawasiuta/README-modification
 
 Modified doc files to match the project name and objectives
+
+This is the commit message #2:
+
+Update CONTRIBUTING
+
+This is the commit message #3:
+
+Rules for merging PRs
+
+This is the commit message #4:
+
+Merge pull request #1 from kasiawasiuta/README-modification
+
+Modified doc files to match the project name and objectives
+
+Signed-off-by: Caspar Zhang <caspar@linux.alibaba.com>
 ---
- CONTRIBUTING |  34 +-----
+ CONTRIBUTING |  34 ++----
  README.md    | 338 ++++-----------------------------------------------
- 2 files changed, 28 insertions(+), 344 deletions(-)
+ 2 files changed, 29 insertions(+), 343 deletions(-)
 
 diff --git a/CONTRIBUTING b/CONTRIBUTING
-index 000edbeaf..2c74b939d 100644
+index 000edbeaf..06c889778 100644
 --- a/CONTRIBUTING
 +++ b/CONTRIBUTING
 @@ -1,25 +1,10 @@
@@ -42,14 +63,14 @@ index 000edbeaf..2c74b939d 100644
  # How to provide a patch for a new feature
  
  1. If it is a major feature or a semantical change, please don't start coding
-@@ -32,19 +17,12 @@ Here you'll see if there is consensus about your idea.
+@@ -32,19 +17,14 @@ Here you'll see if there is consensus about your idea.
  2. If in step 1 you get an acknowledgment from the project leaders, use the
     following procedure to submit a patch:
  
 -    a. Fork Redis on github ( http://help.github.com/fork-a-repo/ )
 -    b. Create a topic branch (git checkout -b my_branch)
 -    c. Push to your branch (git push origin my_branch)
-+    a. Fork MemKeySB on github ( http://help.github.com/fork-a-repo/ )
++    a. Fork MemKeyDB on github ( http://help.github.com/fork-a-repo/ )
 +    b. Create a topic branch (git checkout -b general-change-topic)
 +    c. Push to your branch (git push origin general-change-topic)
      d. Initiate a pull request on github ( https://help.github.com/articles/creating-a-pull-request/ )
@@ -61,9 +82,10 @@ index 000edbeaf..2c74b939d 100644
 -certain issues/PRs over others. If you think your issue/PR is very important
 -try to popularize it, have other users commenting and sharing their point of
 -view and so forth. This helps.
--
--4. For minor fixes just open a pull request on Github.
 +3. For minor fixes just open a pull request on Github.
+ 
+-4. For minor fixes just open a pull request on Github.
++4. MemKeyDB has 4 core maintainers. Each patch must receive an approval from at least two core maintainers and pass all CI checks before it can be merged.
  
  Thanks!
 diff --git a/README.md b/README.md

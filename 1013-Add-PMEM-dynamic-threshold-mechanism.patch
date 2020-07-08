@@ -1,7 +1,7 @@
-From e14cca8f53890ddc8eb33cd044c5136890bb44a3 Mon Sep 17 00:00:00 2001
+From 80d687c504e22d991b4bdd54e137678cb817b522 Mon Sep 17 00:00:00 2001
 From: jschmieg <jakub.schmiegel@intel.com>
 Date: Tue, 19 May 2020 15:55:01 +0200
-Subject: [PATCH 21/23] Add PMEM dynamic threshold mechanism
+Subject: [PATCH 13/16] Add PMEM dynamic threshold mechanism
 
 - Monitors DRAM/PMEM proportion and adjust internal threshold to keep target ratio
 - Additonally check trend of ratio change and distance to target ratio

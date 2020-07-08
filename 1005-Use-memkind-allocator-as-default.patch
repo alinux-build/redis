@@ -1,7 +1,7 @@
-From 2fe9b3d95adc26e6c1a0397f0e50da496df18ef6 Mon Sep 17 00:00:00 2001
+From 209cde6bc2c86d9b6c58d8d058e8cd0665fe9538 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Tue, 14 Apr 2020 15:05:47 +0200
-Subject: [PATCH 11/23] Use memkind allocator as default
+Subject: [PATCH 05/16] Use memkind allocator as default
 
 ---
  README.md    |  6 ++----
@@ -26,7 +26,7 @@ index 9aaa229c2..3eb2827fe 100644
  To force compiling against libc malloc, use:
  
 diff --git a/src/Makefile b/src/Makefile
-index 8fd79172a..c67f65103 100644
+index fe84dce48..9ce1573c8 100644
 --- a/src/Makefile
 +++ b/src/Makefile
 @@ -34,15 +34,8 @@ INSTALL_BIN=$(PREFIX)/bin

@@ -1,7 +1,7 @@
-From 29e98d5465fd59bdbf061aeae407a0de87a69ec5 Mon Sep 17 00:00:00 2001
+From 01e3d8fdf48d255d571828c63516deb66d5169fb Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Mon, 20 Apr 2020 12:54:41 +0200
-Subject: [PATCH 14/23] Add PMEM config test
+Subject: [PATCH 08/16] Add PMEM config test
 
 Check correct setup of PMEM configuration
 To run test, call:

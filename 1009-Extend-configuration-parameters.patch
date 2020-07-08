@@ -1,7 +1,7 @@
-From 3dd11f401c8a094b8e48197a8df02352e8079cde Mon Sep 17 00:00:00 2001
+From 7ee7849e6e57a478e8ecd55e98e561ad1dda470c Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Mon, 20 Apr 2020 13:17:35 +0200
-Subject: [PATCH 15/23] Extend configuration parameters
+Subject: [PATCH 09/16] Extend configuration parameters
 
 - maximum value of dynamic threshold parameter defined in bytes
 - memory ratio check period how often DRAM/PMEM ratio will be checked
@@ -15,7 +15,7 @@ Co-authored-by: jschmieg <jakub.schmiegel@intel.com>
  4 files changed, 29 insertions(+), 5 deletions(-)
 
 diff --git a/redis.conf b/redis.conf
-index 1e3e739db..e083dee8d 100644
+index c24694293..4e85010a3 100644
 --- a/redis.conf
 +++ b/redis.conf
 @@ -1857,7 +1857,8 @@ static-threshold 64
