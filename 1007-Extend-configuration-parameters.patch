@@ -1,7 +1,7 @@
-From 7ee7849e6e57a478e8ecd55e98e561ad1dda470c Mon Sep 17 00:00:00 2001
+From 0aa1a9262dea3bd295be66d1e73119f2c689ce49 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Mon, 20 Apr 2020 13:17:35 +0200
-Subject: [PATCH 09/16] Extend configuration parameters
+Subject: [PATCH 07/13] Extend configuration parameters
 
 - maximum value of dynamic threshold parameter defined in bytes
 - memory ratio check period how often DRAM/PMEM ratio will be checked

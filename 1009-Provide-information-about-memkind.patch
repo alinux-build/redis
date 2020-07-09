@@ -1,7 +1,7 @@
-From 9f04b6552310a738d6d4ee11d45edaea5b816af5 Mon Sep 17 00:00:00 2001
+From 68887b3c063a92a3a1c2c44b8e8574c530645d75 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Tue, 19 May 2020 20:47:33 +0200
-Subject: [PATCH 12/16] Provide information about memkind
+Subject: [PATCH 09/13] Provide information about memkind
 
 - which version should be used
 - which configure options should be set
@@ -12,12 +12,12 @@ Co-authored-by: jschmieg <jakub.schmiegel@intel.com>
  1 file changed, 10 insertions(+)
 
 diff --git a/README.md b/README.md
-index 3eb2827fe..f1017ee18 100644
+index 99c2deb67..8f301eae9 100644
 --- a/README.md
 +++ b/README.md
-@@ -9,6 +9,16 @@ The data stored on the medium is volatile and the persistency is preserved with
+@@ -22,6 +22,16 @@ If you want to know more, this is a list of selected starting points:
  
- Building MemKeyDB
+ Building Redis
  --------------
 +You will need to install the following required packages on the build system:
 +* libdaxctl-devel (v66 or later) -- required by memkind
@@ -30,8 +30,8 @@ index 3eb2827fe..f1017ee18 100644
 +    % make
 +    % make install
  
- It is as simple as:
- 
+ Redis can be compiled and used on Linux, OSX, OpenBSD, NetBSD, FreeBSD.
+ We support big endian and little endian architectures, and both 32 bit
 -- 
 2.19.1.6.gb485710b
 

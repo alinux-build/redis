@@ -1,4 +1,4 @@
-%define alicloud_base_release 2
+%define alicloud_base_release 3
 #
 # Fedora spec file for redis
 #
@@ -11,8 +11,14 @@
 # Tests fail in mock, not in local build.
 %global with_tests %{?_with_tests:1}%{!?_with_tests:0}
 
-# PMEM feature backported from memKeyDB
+# PMEM feature backported from memKeyDB, only enabled for x86 platform
+%ifarch x86_64 %{ix86}
 %global use_pmem    1
+%else
+%global use_pmem    0
+%endif
+
+%global memkind_version 1.10.1-rc2
 
 # Commit IDs for the (unversioned) redis-doc repository
 # https://fedoraproject.org/wiki/Packaging:SourceURL "Commit Revision"
@@ -41,12 +47,10 @@ Source7:           %{name}-limit-systemd
 Source8:           %{name}-limit-init
 Source9:           macros.%{name}
 Source10:          https://github.com/antirez/%{name}-doc/archive/%{doc_commit}/%{name}-doc-%{short_doc_commit}.tar.gz
-%if 0%{?use_pmem}
 # We use memkind as default allocator in PMEM feature, which is built
 # with special configurations. So we link memkind source as redis
 # build deps
-Source11:          memkind-1.10.1-rc2.tar.gz
-%endif
+Source11:          memkind-%{memkind_version}.tar.gz
 
 # To refresh patches:
 # tar xf redis-xxx.tar.gz && cd redis-xxx && git init && git add . && git commit -m "%%{version} baseline"
@@ -61,24 +65,20 @@ Patch0002:         0002-install-redis-check-rdb-as-a-symlink-instead-of-dupl.pat
 # https://github.com/antirez/redis/pull/7168 - notify systemd
 Patch0003:         0003-Notify-systemd-on-sentinel-startup.patch
 
-%if 0%{?use_pmem}
 # Patches backported from memKeyDB, to enable PMEM feature
-Patch1001:         1001-docs-update-CONTRIBUTING-and-README.md.patch
-Patch1002:         1002-Extend-redis-configuration-options.patch
-Patch1003:         1003-Add-basic-support-to-memkind-allocator.patch
-Patch1004:         1004-Add-memkind-defrag-implementation.patch
-Patch1005:         1005-Use-memkind-allocator-as-default.patch
-Patch1006:         1006-Add-PMEM-mechanism-to-zmalloc-module.patch
-Patch1007:         1007-Update-INFO-command.patch
-Patch1008:         1008-Add-PMEM-config-test.patch
-Patch1009:         1009-Extend-configuration-parameters.patch
-Patch1011:         1011-Move-often-used-structures-explicitly-to-DRAM.patch
-Patch1012:         1012-Provide-information-about-memkind.patch
-Patch1013:         1013-Add-PMEM-dynamic-threshold-mechanism.patch
-Patch1014:         1014-Enable-memkind_defrag_reallocate-to-work-on-all-allo.patch
-Patch1015:         1015-Add-hashtable-on-dram-option.patch
-Patch1016:         1016-add-memkind-as-build-deps.patch
-%endif
+Patch1001:         1001-Extend-redis-configuration-options.patch
+Patch1002:         1002-Add-basic-support-to-memkind-allocator.patch
+Patch1003:         1003-Add-memkind-defrag-implementation.patch
+Patch1004:         1004-Add-PMEM-mechanism-to-zmalloc-module.patch
+Patch1005:         1005-Update-INFO-command.patch
+Patch1006:         1006-Add-PMEM-config-test.patch
+Patch1007:         1007-Extend-configuration-parameters.patch
+Patch1008:         1008-Move-often-used-structures-explicitly-to-DRAM.patch
+Patch1009:         1009-Provide-information-about-memkind.patch
+Patch1010:         1010-Add-PMEM-dynamic-threshold-mechanism.patch
+Patch1011:         1011-Enable-memkind_defrag_reallocate-to-work-on-all-allo.patch
+Patch1012:         1012-Add-hashtable-on-dram-option.patch
+Patch1013:         1013-add-memkind-as-build-deps.patch
 
 %if 0%{?alinux} < 3
 BuildRequires:     devtoolset-6-gcc devtoolset-6-libatomic-devel
@@ -177,7 +177,7 @@ administration and development.
 %setup -q
 mv ../%{name}-doc-%{doc_commit} doc
 %if 0%{?use_pmem}
-mv ../memkind-1.10.1-rc2 deps/memkind
+mv ../memkind-%{memkind_version} deps/memkind
 %endif
 %patch0001 -p1
 %patch0002 -p1
@@ -193,12 +193,10 @@ mv ../memkind-1.10.1-rc2 deps/memkind
 %patch1007 -p1
 %patch1008 -p1
 %patch1009 -p1
+%patch1010 -p1
 %patch1011 -p1
 %patch1012 -p1
 %patch1013 -p1
-%patch1014 -p1
-%patch1015 -p1
-%patch1016 -p1
 %endif
 
 mv deps/lua/COPYRIGHT    COPYRIGHT-lua
@@ -218,6 +216,10 @@ if test "$api" != "%{redis_modules_abi}"; then
 fi
 
 %global make_flags	DEBUG="" V="echo" LDFLAGS="%{?__global_ldflags}" CFLAGS+="%{optflags} -fPIC" INSTALL="install -p" PREFIX=%{buildroot}%{_prefix} BUILD_WITH_SYSTEMD=yes BUILD_TLS=yes
+# Build with PMEM feature
+%if 0%{?use_pmem}
+%global make_flags  MALLOC=memkind %{make_flags}
+%endif
 
 %build
 source /opt/rh/devtoolset-6/enable
@@ -348,7 +350,7 @@ exit 0
 
 
 %changelog
-* Thu Jul 09 2020 Caspar Zhang <caspar@linux.alibaba.com> - 6.0.5-1.2
+* Thu Jul 09 2020 Caspar Zhang <caspar@linux.alibaba.com> - 6.0.5-1.3
 - Backport patches from memKeyDB to enable PMEM feature
 
 * Tue Jul 07 2020 Caspar Zhang <caspar@linux.alibaba.com> - 6.0.5-1.1

@@ -1,7 +1,7 @@
-From 18f916e697a30b7a1ff5417c0d8388b956294230 Mon Sep 17 00:00:00 2001
+From ce49d2efeb725f7dbf2909f657ea929f086d083f Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Thu, 9 Apr 2020 11:53:35 +0200
-Subject: [PATCH 04/16] Add memkind defrag implementation
+Subject: [PATCH 03/13] Add memkind defrag implementation
 
 Co-authored-by: jschmieg <jakub.schmiegel@intel.com>
 ---

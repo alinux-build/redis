@@ -1,7 +1,7 @@
-From 0b382470effb3c71e99a993f526c9b5dfb5050d0 Mon Sep 17 00:00:00 2001
+From dae5c9d28fcc7a16786bb48e24bbd8c2526e745e Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Fri, 29 May 2020 11:18:58 +0200
-Subject: [PATCH 15/16] Add hashtable-on-dram option
+Subject: [PATCH 12/13] Add hashtable-on-dram option
 
 - set to no to keep expected dram-pmem ratio for small object size e.g.
 32 bytes for 1:16 ratio

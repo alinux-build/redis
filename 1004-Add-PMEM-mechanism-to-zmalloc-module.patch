@@ -1,7 +1,7 @@
-From f18cfda1024c6bd7f307c16b4d054258e58e1ded Mon Sep 17 00:00:00 2001
+From 4082899024ed480e943ffbce55a55d5e1640cee6 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Mon, 20 Apr 2020 12:37:51 +0200
-Subject: [PATCH 06/16] Add PMEM mechanism to zmalloc module
+Subject: [PATCH 04/13] Add PMEM mechanism to zmalloc module
 
 - use MEMKIND_DAX_KMEM for PMEM allocations
 - use threshold to distinguish allocaitons between DRAM and PMEM

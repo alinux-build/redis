@@ -1,12 +1,12 @@
-From 4e9999d85bfc2e405d5e9bceea3c39ca6f3a0224 Mon Sep 17 00:00:00 2001
+From 0d32943179ae9044ce59fca5a37db7b6fcf76fe3 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Thu, 9 Apr 2020 11:50:46 +0200
-Subject: [PATCH 03/16] Add basic support to memkind allocator
+Subject: [PATCH 02/13] Add basic support to memkind allocator
 
 - compile against libmemkind: make MALLOC=memkind
 
 Co-authored-by: jschmieg <jakub.schmiegel@intel.com>
-[ caspar: add -lnuma in FINAL_LIBS if using memkind as default allocator. ]
+[ caspar: add -lnuma to FINAL_LIBS for memkind build ]
 Signed-off-by: Caspar Zhang <caspar@linux.alibaba.com>
 ---
  README.md     |  4 ++++
@@ -16,10 +16,10 @@ Signed-off-by: Caspar Zhang <caspar@linux.alibaba.com>
  4 files changed, 29 insertions(+)
 
 diff --git a/README.md b/README.md
-index c4519a7f3..9aaa229c2 100644
+index c08013416..99c2deb67 100644
 --- a/README.md
 +++ b/README.md
-@@ -71,6 +71,10 @@ To compile against jemalloc on Mac OS X systems, use:
+@@ -106,6 +106,10 @@ To compile against jemalloc on Mac OS X systems, use:
  
      % make MALLOC=jemalloc
  

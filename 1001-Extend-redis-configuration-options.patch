@@ -1,7 +1,7 @@
-From 28b15732d563d82ea26fbb1d5629cd4e8a314c57 Mon Sep 17 00:00:00 2001
+From bd9fb0a7c0a257f25a3a5608ccf11b6b37731010 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Mon, 17 Feb 2020 15:33:37 +0100
-Subject: [PATCH 02/16] Extend redis configuration options:
+Subject: [PATCH 01/13] Extend redis configuration options:
 
 - memory-alloc-policy is used to described how/if Persistent Memory is
 used

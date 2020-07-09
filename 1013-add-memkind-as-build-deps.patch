@@ -1,7 +1,7 @@
-From 1086a60bb98afcac93fc2aaa895c7e8af5606001 Mon Sep 17 00:00:00 2001
+From 0afbd511c856bd016cdf849a1ad2241e7cf53e39 Mon Sep 17 00:00:00 2001
 From: Caspar Zhang <caspar@linux.alibaba.com>
 Date: Tue, 7 Jul 2020 23:17:00 +0800
-Subject: [PATCH 16/16] add memkind as build deps
+Subject: [PATCH 13/13] add memkind as build deps
 
 Signed-off-by: Caspar Zhang <caspar@linux.alibaba.com>
 ---
@@ -33,10 +33,10 @@ index 700867f3b..50f01a7e3 100644
 +
 +.PHONY: memkind
 diff --git a/src/Makefile b/src/Makefile
-index 9ce1573c8..5ab38f012 100644
+index fe84dce48..bf1cabf52 100644
 --- a/src/Makefile
 +++ b/src/Makefile
-@@ -195,8 +195,9 @@ ifeq ($(BUILD_TLS),yes)
+@@ -202,8 +202,9 @@ ifeq ($(BUILD_TLS),yes)
  endif
  
  ifeq ($(MALLOC),memkind)

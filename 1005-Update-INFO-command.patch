@@ -1,7 +1,7 @@
-From 0e57c846c60e1fe30ccd56f02f14794a65d67e9a Mon Sep 17 00:00:00 2001
+From 92dc183ee572117a579bb4f036765df9165fa0b2 Mon Sep 17 00:00:00 2001
 From: michalbiesek <michal.biesek@intel.com>
 Date: Mon, 20 Apr 2020 12:42:31 +0200
-Subject: [PATCH 07/16] Update INFO command
+Subject: [PATCH 05/13] Update INFO command
 
 - provide information related to PMEM settings
 
