@@ -1,4 +1,4 @@
-%define alicloud_base_release 2
+%define alicloud_base_release 3
 %global _hardened_build 1
 %global with_perftools 0
 
@@ -59,6 +59,7 @@ Patch0002:         0002-install-redis-check-rdb-as-a-symlink-instead-of-dupl.pat
 
 # Backport memKeyDB patches from Intel to enable PMEM feature
 Patch1001:         1001-Add-support-for-PMEM.patch
+Patch1002:         1002-Adjust-memory-ratio-during-RDB-AOF-loading-3.2.12.patch
 
 %if 0%{?with_perftools}
 BuildRequires:     gperftools-devel
@@ -151,6 +152,7 @@ mv ../memkind-%{memkind_version} deps/memkind
 
 %if 0%{?use_pmem}
 %patch1001 -p1
+%patch1002 -p1
 %endif
 
 # Use system jemalloc library
@@ -313,6 +315,9 @@ fi
 
 
 %changelog
+* Mon Jul 20 2020 Jacob Wang <yungao.wjb@alibaba-inc.com> - 3.2.12-2.3
+- Adjust memory ratio during RDB/AOF loading
+
 * Mon Jun 29 2020 Jacob Wang <yungao.wjb@alibaba-inc.com> - 3.2.12-2.2
 - Rebuild for Alibaba Cloud Linux
 - Backport memKeyDB patches from Intel to redis v3.2.12

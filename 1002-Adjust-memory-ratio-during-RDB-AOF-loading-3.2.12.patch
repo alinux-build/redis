@@ -1,0 +1,191 @@
+From 79d22f9e57eedaa1379561d8ca1bd936351f1f2f Mon Sep 17 00:00:00 2001
+From: michalbiesek <michal.biesek@intel.com>
+Date: Fri, 17 Jul 2020 13:08:16 +0200
+Subject: [PATCH 1/1] Adjust memory ratio during RDB/AOF loading
+
+---
+ src/aof.c    |  1 +
+ src/pmem.c   | 57 ++++++++++++++++++++++++++--------------------------
+ src/rdb.c    | 24 +++++++++++++++++++++-
+ src/server.c |  6 +++++-
+ 4 files changed, 57 insertions(+), 31 deletions(-)
+
+diff --git a/src/aof.c b/src/aof.c
+index 674de25e1..c9953d66c 100644
+--- a/src/aof.c
++++ b/src/aof.c
+@@ -665,6 +665,7 @@ int loadAppendOnlyFile(char *filename) {
+         if (!(loops++ % 1000)) {
+             loadingProgress(ftello(fp));
+             processEventsWhileBlocked();
++            adjustPmemThresholdCycle();
+         }
+ 
+         if (fgets(buf,sizeof(buf),fp) == NULL) {
+diff --git a/src/pmem.c b/src/pmem.c
+index 0d8982863..08744f752 100755
+--- a/src/pmem.c
++++ b/src/pmem.c
+@@ -63,37 +63,36 @@ void pmemThresholdInit(void) {
+ 
+ void adjustPmemThresholdCycle(void) {
+     if (server.memory_alloc_policy == MEM_POLICY_RATIO) {
+-        run_with_period(server.ratio_check_period) {
+-            /* Difference between target ratio and current ratio in last checkpoint*/
+-            static double ratio_diff_checkpoint;
+-            /* PMEM and DRAM utilization in last checkpoint*/
+-            static size_t total_memory_checkpoint;
+-            size_t pmem_memory = zmalloc_used_pmem_memory();
+-            size_t dram_memory = zmalloc_used_memory();
+-            size_t total_memory_current = pmem_memory + dram_memory;
+-            // do not modify threshold when change in memory usage is too small
+-            if (absDiff(total_memory_checkpoint, total_memory_current) > 100) {
+-                double current_ratio = (double)pmem_memory/dram_memory;
+-                double current_ratio_diff = fabs(current_ratio - server.target_pmem_dram_ratio);
+-                if (current_ratio_diff > 0.02) {
+-                    //current ratio is worse than moment before
+-                    double variableMultipler = current_ratio/server.target_pmem_dram_ratio;
+-                    double step = (current_ratio_diff < ratio_diff_checkpoint) ?
+-                                  variableMultipler*THRESHOLD_STEP_NORMAL : variableMultipler*THRESHOLD_STEP_AGGRESIVE;
+-                    size_t threshold = zmalloc_get_threshold();
+-                    if (server.target_pmem_dram_ratio < current_ratio) {
+-                        size_t higher_threshold = THRESHOLD_UP(threshold,step);
+-                        if (higher_threshold <= server.dynamic_threshold_max)
+-                            zmalloc_set_threshold(higher_threshold);
+-                    } else {
+-                        size_t lower_threshold = THRESHOLD_DOWN(threshold,step);
+-                        if (lower_threshold >= server.dynamic_threshold_min)
+-                            zmalloc_set_threshold(lower_threshold);
+-                    }
++        /* Difference between target ratio and current ratio in last checkpoint*/
++        static double ratio_diff_checkpoint;
++        /* PMEM and DRAM utilization in last checkpoint*/
++        static size_t total_memory_checkpoint;
++        size_t pmem_memory = zmalloc_used_pmem_memory();
++        size_t dram_memory = zmalloc_used_memory();
++        size_t total_memory_current = pmem_memory + dram_memory;
++        // do not modify threshold when change in memory usage is too small
++        if (absDiff(total_memory_checkpoint, total_memory_current) > 100) {
++            double current_ratio = (double)pmem_memory/dram_memory;
++            double current_ratio_diff = fabs(current_ratio - server.target_pmem_dram_ratio);
++            if (current_ratio_diff > 0.02) {
++                //current ratio is worse than moment before
++                double variableMultipler = current_ratio/server.target_pmem_dram_ratio;
++                double step = (current_ratio_diff < ratio_diff_checkpoint) ?
++                              variableMultipler*THRESHOLD_STEP_NORMAL : variableMultipler*THRESHOLD_STEP_AGGRESIVE;
++                size_t threshold = zmalloc_get_threshold();
++                if (server.target_pmem_dram_ratio < current_ratio) {
++                    size_t higher_threshold = THRESHOLD_UP(threshold,step);
++                    if (higher_threshold <= server.dynamic_threshold_max)
++                        zmalloc_set_threshold(higher_threshold);
++                } else {
++                    size_t lower_threshold = THRESHOLD_DOWN(threshold,step);
++                    if (lower_threshold >= server.dynamic_threshold_min)
++                        zmalloc_set_threshold(lower_threshold);
+                 }
+-                ratio_diff_checkpoint = current_ratio_diff;
+             }
+-            total_memory_checkpoint = total_memory_current;
++            ratio_diff_checkpoint = current_ratio_diff;
+         }
++        total_memory_checkpoint = total_memory_current;
++
+     }
+ }
+diff --git a/src/rdb.c b/src/rdb.c
+index 3bd3d030c..830421777 100644
+--- a/src/rdb.c
++++ b/src/rdb.c
+@@ -992,6 +992,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
+ 
+         /* Load every single element of the list */
+         while(len--) {
++            if (len%100 == 0) {
++                adjustPmemThresholdCycle();
++            }
+             if ((ele = rdbLoadEncodedStringObject(rdb)) == NULL) return NULL;
+             dec = getDecodedObject(ele);
+             size_t len = sdslen(dec->ptr);
+@@ -1017,6 +1020,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
+         /* Load every single element of the list/set */
+         for (i = 0; i < len; i++) {
+             long long llval;
++            if (len%100 == 0) {
++                adjustPmemThresholdCycle();
++            }
+             if ((ele = rdbLoadEncodedStringObject(rdb)) == NULL) return NULL;
+             ele = tryObjectEncoding(ele);
+ 
+@@ -1053,6 +1059,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
+             robj *ele;
+             double score;
+             zskiplistNode *znode;
++            if (zsetlen%100 == 0) {
++                adjustPmemThresholdCycle();
++            }
+ 
+             if ((ele = rdbLoadEncodedStringObject(rdb)) == NULL) return NULL;
+             ele = tryObjectEncoding(ele);
+@@ -1089,6 +1098,11 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
+             robj *field, *value;
+ 
+             len--;
++
++            if (len%100 == 0) {
++                adjustPmemThresholdCycle();
++            }
++
+             /* Load raw strings */
+             field = rdbLoadStringObject(rdb);
+             if (field == NULL) return NULL;
+@@ -1143,6 +1157,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
+                             server.list_compress_depth);
+ 
+         while (len--) {
++            if (len%100 == 0) {
++                adjustPmemThresholdCycle();
++            }
+             unsigned char *zl = rdbGenericLoadStringObject(rdb,RDB_LOAD_PLAIN);
+             if (zl == NULL) return NULL;
+             quicklistAppendZiplist(o->ptr, zl);
+@@ -1281,6 +1298,7 @@ int rdbLoad(char *filename) {
+     long long expiretime, now = mstime();
+     FILE *fp;
+     rio rdb;
++    int i=0;
+ 
+     if ((fp = fopen(filename,"r")) == NULL) return C_ERR;
+ 
+@@ -1307,7 +1325,11 @@ int rdbLoad(char *filename) {
+     while(1) {
+         robj *key, *val;
+         expiretime = -1;
+-
++        i++;
++        if (i%1000 == 0) {
++            i=0;
++            adjustPmemThresholdCycle();
++        }
+         /* Read type. */
+         if ((type = rdbLoadType(&rdb)) == -1) goto eoferr;
+ 
+diff --git a/src/server.c b/src/server.c
+index 906425742..c0007dc65 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -1033,7 +1033,11 @@ void databasesCron(void) {
+         activeExpireCycle(ACTIVE_EXPIRE_CYCLE_SLOW);
+ 
+     /* Adjust PMEM threshold. */
+-    adjustPmemThresholdCycle();
++    if (server.memory_alloc_policy == MEM_POLICY_RATIO) {
++        run_with_period(server.ratio_check_period) {
++            adjustPmemThresholdCycle();
++        }
++    }
+ 
+     /* Perform hash tables rehashing if needed, but only if there are no
+      * other processes saving the DB on disk. Otherwise rehashing is bad
+-- 
+2.17.1
+
