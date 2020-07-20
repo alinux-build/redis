@@ -1,4 +1,4 @@
-%define alicloud_base_release 3
+%define alicloud_base_release 4
 #
 # Fedora spec file for redis
 #
@@ -79,6 +79,7 @@ Patch1010:         1010-Add-PMEM-dynamic-threshold-mechanism.patch
 Patch1011:         1011-Enable-memkind_defrag_reallocate-to-work-on-all-allo.patch
 Patch1012:         1012-Add-hashtable-on-dram-option.patch
 Patch1013:         1013-add-memkind-as-build-deps.patch
+Patch1014:         1014-Adjust-memory-ratio-during-RDB-AOF-load-6.patch
 
 %if 0%{?alinux} < 3
 BuildRequires:     devtoolset-6-gcc devtoolset-6-libatomic-devel
@@ -197,6 +198,7 @@ mv ../memkind-%{memkind_version} deps/memkind
 %patch1011 -p1
 %patch1012 -p1
 %patch1013 -p1
+%patch1014 -p1
 %endif
 
 mv deps/lua/COPYRIGHT    COPYRIGHT-lua
@@ -350,6 +352,9 @@ exit 0
 
 
 %changelog
+* Mon Jul 20 2020 Jacob Wang <yungao.wjb@alibaba-inc.com> - 6.0.5-1.4
+- Adjust memory ratio during RDB/AOF loading
+
 * Thu Jul 09 2020 Caspar Zhang <caspar@linux.alibaba.com> - 6.0.5-1.3
 - Backport patches from memKeyDB to enable PMEM feature
 
