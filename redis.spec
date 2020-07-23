@@ -1,4 +1,4 @@
-%define alicloud_base_release 4
+%define alicloud_base_release 5
 #
 # Fedora spec file for redis
 #
@@ -80,6 +80,7 @@ Patch1011:         1011-Enable-memkind_defrag_reallocate-to-work-on-all-allo.pat
 Patch1012:         1012-Add-hashtable-on-dram-option.patch
 Patch1013:         1013-add-memkind-as-build-deps.patch
 Patch1014:         1014-Adjust-memory-ratio-during-RDB-AOF-load-6.patch
+Patch1015:         1015-Replace-zmalloc-with-zmalloc_dram-to-fix-memory-usag6.0.5.patch
 
 %if 0%{?alinux} < 3
 BuildRequires:     devtoolset-6-gcc devtoolset-6-libatomic-devel
@@ -199,6 +200,7 @@ mv ../memkind-%{memkind_version} deps/memkind
 %patch1012 -p1
 %patch1013 -p1
 %patch1014 -p1
+%patch1015 -p1
 %endif
 
 mv deps/lua/COPYRIGHT    COPYRIGHT-lua
@@ -352,6 +354,9 @@ exit 0
 
 
 %changelog
+* Thu Jul 23 2020 Jacob Wang <yungao.wjb@alibaba-inc.com> - 6.0.5-1.5
+- Fix allocating clients_pending_write always from DRAM
+
 * Mon Jul 20 2020 Jacob Wang <yungao.wjb@alibaba-inc.com> - 6.0.5-1.4
 - Adjust memory ratio during RDB/AOF loading
 

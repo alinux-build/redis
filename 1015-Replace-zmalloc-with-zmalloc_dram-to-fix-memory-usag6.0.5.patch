@@ -1,0 +1,26 @@
+From 01331f4e5af9e578a0985fd38914b75bf52eded8 Mon Sep 17 00:00:00 2001
+From: Patryk Kaminski <patryk.kaminski@intel.com>
+Date: Tue, 21 Jul 2020 14:46:42 +0200
+Subject: [PATCH] Replace zmalloc with zmalloc_dram to fix memory usage
+ calculation
+
+---
+ src/networking.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/networking.c b/src/networking.c
+index f8eccec9d..a0cd03107 100644
+--- a/src/networking.c
++++ b/src/networking.c
+@@ -2574,7 +2574,7 @@ void rewriteClientCommandVector(client *c, int argc, ...) {
+     int j;
+     robj **argv; /* The new argument vector */
+ 
+-    argv = zmalloc(sizeof(robj*)*argc);
++    argv = zmalloc_dram(sizeof(robj*)*argc);
+     va_start(ap,argc);
+     for (j = 0; j < argc; j++) {
+         robj *a;
+-- 
+2.20.1
+
