@@ -1,0 +1,39 @@
+From 99bcf40e424ed3e077a5627eac23bbbaa289cf0a Mon Sep 17 00:00:00 2001
+From: Patryk Kaminski <patryk.kaminski@intel.com>
+Date: Tue, 21 Jul 2020 14:46:42 +0200
+Subject: [PATCH] Replace zmalloc with zmalloc_dram to fix memory usage
+ calculation
+
+Fix allocating clients_pending_write always from DRAM
+
+Co-authored-by: Patryk Kaminski <patryk.kaminski@intel.com>
+Co-authored-by: Jakub Schmiegel <jakub.schmiegel@intel.com>
+---
+ src/networking.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/networking.c b/src/networking.c
+index 0966c2552..402e3b0c3 100644
+--- a/src/networking.c
++++ b/src/networking.c
+@@ -183,7 +183,7 @@ int prepareClientToWrite(client *c) {
+          * a system call. We'll only really install the write handler if
+          * we'll not be able to write the whole reply at once. */
+         c->flags |= CLIENT_PENDING_WRITE;
+-        listAddNodeHead(server.clients_pending_write,c);
++        listAddNodeHeadDRAM(server.clients_pending_write,c);
+     }
+ 
+     /* Authorize the caller to queue in the output buffer of this client. */
+@@ -1679,7 +1679,7 @@ void rewriteClientCommandVector(client *c, int argc, ...) {
+     int j;
+     robj **argv; /* The new argument vector */
+ 
+-    argv = zmalloc(sizeof(robj*)*argc);
++    argv = zmalloc_dram(sizeof(robj*)*argc);
+     va_start(ap,argc);
+     for (j = 0; j < argc; j++) {
+         robj *a;
+-- 
+2.20.1
+
